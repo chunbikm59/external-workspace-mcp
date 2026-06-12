@@ -1,0 +1,6 @@
+{
+  "allowed_paths": ["."],
+  "host": "0.0.0.0",
+  "port": 8100,
+  "whitelist_filename": ".cmd_whitelist.json"
+}
