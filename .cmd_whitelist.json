@@ -1,13 +1,13 @@
 {
   "commands": [
-    "git status",
-    "git log --oneline -20",
-    "git diff",
-    "git diff --staged",
-    "git branch",
-    "git branch -a",
-    "git stash list",
-    "git show --stat HEAD",
-    { "command": "cd frontend; npm run build", "description": "切換到 frontend 目錄並執行 build" }
+    "cd backend",
+    "cd frontend",
+    "cd api",
+    "cd ui",
+    "python -m venv .venv",
+    "./.venv/Scripts/python.exe main.py",
+    "./.venv/Scripts/pip.exe install -r requirements.txt",
+    "npm install",
+    "npm run build"
   ]
 }

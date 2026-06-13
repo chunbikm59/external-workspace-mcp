@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
 import shutil
@@ -25,6 +26,8 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
+
+import sys
 
 import mcp.types as mt
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -186,11 +189,34 @@ def _load_whitelist(allowed_paths: list[Path], filename: str) -> list[str]:
     return commands
 
 
+def _ask_user_confirm(prompt_lines: list[str]) -> bool:
+    """在終端印出提示並等待使用者輸入 y/N，回傳 True 表示確認。
+    在非互動式 stdin（被重導向）時預設拒絕。"""
+    try:
+        sys.stdout.write("\n".join(prompt_lines))
+        sys.stdout.flush()
+        answer = sys.stdin.readline().strip().lower()
+        return answer in ("y", "yes")
+    except EOFError:
+        sys.stdout.write("\n[INFO] stdin 非互動式，自動拒絕重載。\n")
+        sys.stdout.flush()
+        return False
+
+
 def _build_shell_args(command: str) -> list[str]:
     """依作業系統回傳對應的 shell 呼叫參數。"""
     if platform.system() == "Windows":
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
     return ["/bin/sh", "-c", command]
+
+
+_COMPOSITE_SEP = re.compile(r"\s*;\s*")
+
+
+def _parse_composite_command(command: str) -> list[str]:
+    """將以 ';' 分隔的組合命令拆成子命令清單，單一命令回傳長度為 1 的清單。"""
+    parts = _COMPOSITE_SEP.split(command)
+    return [p.strip() for p in parts if p.strip()]
 
 
 # ── 命令執行工具 ──────────────────────────────────────────────────────────────
@@ -227,52 +253,101 @@ def _build_cmd_server(
     ) or "  （白名單為空）"
 
     @cmd_mcp.tool()
-    def run_command(command: str) -> dict[str, Any]:
-        if command not in whitelist:
+    def run_command(command: str, fail_fast: bool = True) -> dict[str, Any]:
+        sub_commands = _parse_composite_command(command)
+
+        if not sub_commands:
+            return {"success": False, "error": "命令為空"}
+
+        invalid = [cmd for cmd in sub_commands if cmd not in whitelist]
+        if invalid:
             return {
                 "success": False,
-                "error": f"命令 '{command}' 不在白名單中。允許的命令：{whitelist}",
+                "error": f"以下子命令不在白名單中：{invalid}。\n允許的命令：{whitelist}",
             }
 
-        # 在第一個 allowed_path 下執行
         cwd = str(allowed_paths[0]) if allowed_paths else None
+        results = []
+        overall_success = True
 
-        try:
-            result = subprocess.run(
-                _build_shell_args(command),
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                timeout=120,
-            )
+        for sub_cmd in sub_commands:
+            try:
+                proc = subprocess.run(
+                    _build_shell_args(sub_cmd),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=cwd,
+                    timeout=120,
+                )
+                sub_result: dict[str, Any] = {
+                    "command": sub_cmd,
+                    "success": proc.returncode == 0,
+                    "returncode": proc.returncode,
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                }
+            except subprocess.TimeoutExpired:
+                sub_result = {"command": sub_cmd, "success": False, "error": "命令執行超時（120 秒）"}
+            except Exception as exc:
+                sub_result = {"command": sub_cmd, "success": False, "error": str(exc)}
+
+            results.append(sub_result)
+            if not sub_result["success"]:
+                overall_success = False
+                if fail_fast:
+                    break
+
+        # 單一命令：維持向後相容格式
+        if len(sub_commands) == 1:
+            r = results[0]
+            if "error" in r:
+                return {"success": r["success"], "error": r["error"]}
             return {
-                "success": result.returncode == 0,
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "success": r["success"],
+                "returncode": r["returncode"],
+                "stdout": r["stdout"],
+                "stderr": r["stderr"],
             }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "命令執行超時（120 秒）"}
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+
+        # 組合命令
+        return {
+            "success": overall_success,
+            "commands_executed": len(results),
+            "commands_total": len(sub_commands),
+            "results": results,
+        }
 
     _cwd_display = str(allowed_paths[0]) if allowed_paths else "（無）"
     run_command.__doc__ = f"""執行白名單中的命令（Windows 使用 PowerShell，其他平台使用 /bin/sh）。
+支援以 ';' 串接多個白名單命令依序執行。
 
 工作目錄：{_cwd_display}（第一個 allowed_path）
 
 允許的命令：
 {whitelist_doc}
 
-回傳值（dict）：
+參數：
+  command   (str)  — 要執行的命令；可用 ';' 串接多個白名單命令
+                      例如：'npm install; npm run build'
+  fail_fast (bool) — 組合命令模式下，若某步驟失敗是否立即停止（預設 True）
+
+單一命令回傳值（dict）：
   success    (bool) — returncode == 0 時為 True
   returncode (int)  — shell 結束碼
   stdout     (str)  — 標準輸出內容
   stderr     (str)  — 標準錯誤內容
 
+組合命令回傳值（dict）：
+  success           (bool)       — 所有已執行命令均成功時為 True
+  commands_executed (int)        — 實際執行的子命令數（fail_fast 下可能提前停止）
+  commands_total    (int)        — 全部子命令數
+  results           (list[dict]) — 每個子命令的 {{command, success, returncode/error, stdout, stderr}}
+
 失敗時回傳：{{"success": false, "error": "<原因>"}}
 
-注意：命令必須與白名單完全符合，不支援模糊比對。
+注意：每個子命令都必須完全符合白名單中的某一項，否則整批命令都不會執行。
 若不確定有哪些命令可用，請先呼叫 cmd_list_allowed_commands 或 cmd_workspace_context。
 """
 
@@ -336,6 +411,93 @@ def _build_cmd_server(
             "allowed_commands": items,
             "directory_trees": trees,
         }
+
+    @cmd_mcp.tool()
+    def reload_whitelist() -> dict[str, Any]:
+        """要求本機使用者確認後，重新載入白名單檔案並更新 in-memory 白名單。
+
+        呼叫後，proxy server 終端會暫停並顯示確認提示（含新命令清單），
+        等待本機使用者輸入 y/N。
+
+        回傳（dict）：
+          success  (bool) — True 表示已套用，False 表示使用者拒絕
+          message  (str)  — 結果說明
+          commands (list) — 套用後的白名單命令（僅 success=True 時）
+        """
+        new_cmds = _load_whitelist(allowed_paths, whitelist_filename)
+
+        current_set = set(whitelist)
+        new_set = set(new_cmds)
+        added = [c for c in new_cmds if c not in current_set]
+        removed = [c for c in whitelist if c not in new_set]
+        unchanged = [c for c in whitelist if c in new_set]
+
+        _R = "\033[31m"  # 紅
+        _G = "\033[32m"  # 綠
+        _Y = "\033[33m"  # 黃
+        _B = "\033[1m"   # 粗體
+        _0 = "\033[0m"   # reset
+
+        diff_lines: list[str] = []
+        for c in removed:
+            diff_lines.append(f"{_R}  - {c}{_0}")
+        for c in unchanged:
+            diff_lines.append(f"    {c}")
+        for c in added:
+            diff_lines.append(f"{_G}  + {c}{_0}")
+
+        summary_parts = []
+        if added:
+            summary_parts.append(f"{_G}+{len(added)} 新增{_0}")
+        if removed:
+            summary_parts.append(f"{_R}-{len(removed)} 移除{_0}")
+        if not added and not removed:
+            summary_parts.append(f"{_Y}無變更{_0}")
+
+        prompt_lines = [
+            f"\n{_B}" + "=" * 60 + _0,
+            f"{_B}[白名單重載請求] 遠端 agent 要求重新載入白名單{_0}",
+            f"檔案：{whitelist_filename}  |  {', '.join(summary_parts)}  |  套用後共 {len(new_cmds)} 個命令",
+            "",
+            *diff_lines,
+            "",
+            _B + "=" * 60 + _0,
+            "請確認是否套用新白名單？[y/N] ",
+        ]
+
+        confirmed = _ask_user_confirm(prompt_lines)
+
+        if confirmed:
+            whitelist.clear()
+            whitelist.extend(new_cmds)
+
+            cmd_descriptions.clear()
+            for base in allowed_paths:
+                wl_file = base / whitelist_filename
+                if not wl_file.is_file():
+                    continue
+                try:
+                    data = json.loads(wl_file.read_text(encoding="utf-8"))
+                    for entry in data.get("commands", []):
+                        if isinstance(entry, dict):
+                            cmd = entry.get("command", "")
+                            desc = entry.get("description", "")
+                            if cmd:
+                                cmd_descriptions[cmd] = desc
+                except Exception:
+                    pass
+
+            sys.stdout.write(f"[INFO] 白名單已更新，共 {len(whitelist)} 個命令。\n")
+            sys.stdout.flush()
+            return {
+                "success": True,
+                "message": f"白名單已更新，共 {len(whitelist)} 個命令",
+                "commands": list(whitelist),
+            }
+        else:
+            sys.stdout.write("[INFO] 使用者拒絕重載，白名單維持不變。\n")
+            sys.stdout.flush()
+            return {"success": False, "message": "使用者拒絕重載"}
 
     return cmd_mcp
 
@@ -706,8 +868,12 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
 
         # ── content ──────────────────────────────────────────────────────────
         lines = stdout.splitlines()
-        # 解析 heading 行取得 filenames（heading 格式下，無 : 的非空行為檔案名稱）
-        filenames = [l for l in lines if l and ":" not in l and not l.startswith("-")]
+        # 解析 heading 行取得 filenames。
+        # heading 模式下，匹配行格式為 "行號:內容"（純數字開頭後接 :），
+        # 分隔行為 "--"，其餘非空行即為檔案名稱。
+        # 不能用 ":" not in l 判斷，Windows 路徑本身含磁碟代號冒號（D:\...）。
+        _match_line = re.compile(r'^\d+[:-]')
+        filenames = [l for l in lines if l and not _match_line.match(l) and not l.startswith("-")]
         # 套用 offset + head_limit
         if offset:
             lines = lines[offset:]
