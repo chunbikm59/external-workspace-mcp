@@ -40,6 +40,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route
+from markitdown import MarkItDown
 
 logger = logging.getLogger(__name__)
 
@@ -461,6 +462,63 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
     return grep_mcp
 
 
+# ── markitdown 檔案轉換工具 ───────────────────────────────────────────────────
+
+def _build_markitdown_server(allowed_paths: list[Path]) -> FastMCP:
+    """建立以 markitdown 提供檔案轉換為 Markdown 功能的 FastMCP 子伺服器。"""
+    md_mcp = FastMCP(name="Markitdown 轉換器")
+
+    @md_mcp.tool()
+    def convert_to_markdown(
+        input_path: str,
+        output_path: str = "",
+    ) -> dict[str, Any]:
+        """將檔案（PDF、DOCX、PPTX、XLSX、HTML、圖片等）轉換為 Markdown，直接寫入磁碟。
+
+        參數：
+            input_path  - 來源檔案路徑（必須在 allowed_paths 範圍內）
+            output_path - 輸出 .md 檔案路徑（留空時自動以同目錄同檔名加 .md 副檔名）
+
+        回傳：
+            output_path - 實際寫入的 .md 檔案完整路徑
+            title       - 原文件標題（若有）
+            char_count  - 輸出 Markdown 字元數
+        """
+        src = Path(input_path).resolve()
+
+        if not src.is_file():
+            return {"success": False, "error": f"檔案不存在：{input_path}"}
+
+        if not any(src == base or base in src.parents for base in allowed_paths):
+            return {"success": False, "error": "input_path 不在允許的目錄範圍內"}
+
+        if output_path:
+            dst = Path(output_path).resolve()
+            if not any(dst.parent == base or base in dst.parent.parents for base in allowed_paths):
+                return {"success": False, "error": "output_path 不在允許的目錄範圍內"}
+        else:
+            dst = src.with_suffix(".md")
+
+        try:
+            result = MarkItDown().convert(str(src))
+        except Exception as exc:
+            return {"success": False, "error": f"轉換失敗：{exc}"}
+
+        try:
+            dst.write_text(result.markdown, encoding="utf-8")
+        except Exception as exc:
+            return {"success": False, "error": f"寫入檔案失敗：{exc}"}
+
+        return {
+            "success": True,
+            "output_path": str(dst),
+            "title": result.title or "",
+            "char_count": len(result.markdown),
+        }
+
+    return md_mcp
+
+
 # ── 主程式 ────────────────────────────────────────────────────────────────────
 
 def build_app(
@@ -499,7 +557,11 @@ def build_app(
     grep_server = _build_grep_server(allowed_paths, rg_path)
     proxy.mount(grep_server, namespace="grep")
 
-    # 6. Bearer Token 中介軟體（兼記錄各 session 的反向代理 base URL）
+    # 6. 掛載 markitdown 檔案轉換工具
+    markitdown_server = _build_markitdown_server(allowed_paths)
+    proxy.mount(markitdown_server, namespace="md")
+
+    # 7. Bearer Token 中介軟體（兼記錄各 session 的反向代理 base URL）
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             # /health 與 /download/* 不驗證（token 本身即為憑證）
@@ -523,7 +585,7 @@ def build_app(
                     _session_base_urls[session_id] = f"{proto}://{effective_host}"
             return await call_next(request)
 
-    # 7. 取得底層 Starlette app，加入路由與認證中介軟體
+    # 8. 取得底層 Starlette app，加入路由與認證中介軟體
     starlette_app = proxy.http_app(transport="streamable-http")
 
     # 加入 /health 路由
