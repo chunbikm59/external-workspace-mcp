@@ -204,14 +204,6 @@ def _build_cmd_server(
 
     @cmd_mcp.tool()
     def run_command(command: str) -> dict[str, Any]:
-        f"""執行白名單中允許的命令（跨平台：Windows 使用 PowerShell，其他平台使用 sh）。
-
-允許的命令：
-{whitelist_doc}
-
-安全機制：只允許執行完全符合白名單的命令（不支援模糊比對）。
-工作目錄為各 allowed_path。
-        """
         if command not in whitelist:
             return {
                 "success": False,
@@ -240,9 +232,37 @@ def _build_cmd_server(
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+    _cwd_display = str(allowed_paths[0]) if allowed_paths else "（無）"
+    run_command.__doc__ = f"""執行白名單中的命令（Windows 使用 PowerShell，其他平台使用 /bin/sh）。
+
+工作目錄：{_cwd_display}（第一個 allowed_path）
+
+允許的命令：
+{whitelist_doc}
+
+回傳值（dict）：
+  success    (bool) — returncode == 0 時為 True
+  returncode (int)  — shell 結束碼
+  stdout     (str)  — 標準輸出內容
+  stderr     (str)  — 標準錯誤內容
+
+失敗時回傳：{{"success": false, "error": "<原因>"}}
+
+注意：命令必須與白名單完全符合，不支援模糊比對。
+若不確定有哪些命令可用，請先呼叫 cmd_list_allowed_commands 或 cmd_workspace_context。
+"""
+
     @cmd_mcp.tool()
     def list_allowed_commands() -> dict[str, Any]:
-        """列出目前白名單中所有允許執行的命令。"""
+        """列出白名單中所有允許執行的命令。
+
+        若不確定 cmd_run_command 可以執行哪些命令，請先呼叫此工具。
+        （也可呼叫 cmd_workspace_context 一次取得路徑 + 命令 + 目錄結構）
+
+        回傳值（dict）：
+          allowed_commands : list[{command, description}] — 所有可用命令及其說明
+          total            : int — 命令總數
+        """
         items = []
         for cmd in whitelist:
             items.append({
@@ -253,8 +273,45 @@ def _build_cmd_server(
 
     @cmd_mcp.tool()
     def list_allowed_paths() -> dict[str, Any]:
-        """列出此 proxy 允許存取的所有目錄路徑。"""
+        """列出此 proxy 允許存取的所有目錄路徑。
+
+        回傳值（dict）：
+          allowed_paths : list[str] — 可存取的絕對路徑清單
+
+        請將這些路徑作為 grep_files 的 path 參數起點，
+        或傳入 fs_directory_tree 展開目錄結構。
+        """
         return {"allowed_paths": [str(p) for p in allowed_paths]}
+
+    @cmd_mcp.tool()
+    def workspace_context() -> dict[str, Any]:
+        """取得完整工作區概覽，供 agent 初始定向使用。
+
+        第一次連線時請優先呼叫此工具，可一次取得：
+          allowed_paths    : list[str]                     — 此伺服器可存取的根目錄
+          allowed_commands : list[{command, description}]  — 可執行的白名單命令
+          directory_trees  : dict[path, list[str]]         — 各根目錄的頂層子項目
+
+        取得概覽後，可用 fs_directory_tree 深入展開子目錄、grep_files 搜尋內容、
+        cmd_run_command 執行命令。
+        """
+        trees: dict[str, list[str]] = {}
+        for base in allowed_paths:
+            try:
+                children = sorted(str(p.relative_to(base)) for p in base.iterdir())
+            except Exception:
+                children = []
+            trees[str(base)] = children
+
+        items = [
+            {"command": cmd, "description": cmd_descriptions.get(cmd, "")}
+            for cmd in whitelist
+        ]
+        return {
+            "allowed_paths": [str(p) for p in allowed_paths],
+            "allowed_commands": items,
+            "directory_trees": trees,
+        }
 
     return cmd_mcp
 
@@ -284,10 +341,28 @@ def _build_file_server(
 
     @file_mcp.tool()
     def get_download_uri(file_path: str, ctx: Context) -> dict[str, Any]:
-        """產生指定檔案的臨時下載 URI（10 分鐘有效），供遠端 agent 直接 HTTP 下載。
+        """產生指定檔案的臨時 HTTP 下載 URI（10 分鐘有效），供遠端 agent 或使用者直接下載。
 
-        file_path 必須在允許的目錄（allowed_paths）之內。
+        適用情境：
+          - 檔案為二進位格式（圖片、壓縮檔、PDF）—— 無法以文字讀取
+          - 需要讓使用者或另一個服務透過 HTTP 下載（wget / curl / 瀏覽器）
+          - 檔案過大，直接讀取會超出 context 限制
+
+        請勿用於讀取文字檔 —— 直接用 fs_read_file 即可。
+
+        file_path 必須為絕對路徑且在 allowed_paths 範圍內。
+        請從 cmd_list_allowed_paths 或 cmd_workspace_context 取得有效的根路徑。
         回傳的 uri 可直接以 wget / curl / requests.get 下載，不需附帶 Authorization header。
+
+        成功回傳（dict）：
+          success            (bool) — True
+          uri                (str)  — HTTP 下載網址，有效期間為 expires_in_seconds 秒
+          expires_in_seconds (int)  — 600（10 分鐘）
+          file_name          (str)  — 檔案名稱
+
+        失敗回傳（dict）：
+          success (bool) — False
+          error   (str)  — 失敗原因
         """
         _purge_expired_tokens()
 
@@ -415,20 +490,34 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
         """以 ripgrep 在允許目錄內搜尋檔案內容，回傳匹配行與上下文。
 
         參數：
-            pattern       - 搜尋的正則表達式（ripgrep 語法），例如 'TODO' 或 'fn \\w+'
-            path          - 要搜尋的檔案或目錄（必須在 allowed_paths 範圍內）
-            glob          - 檔案過濾 glob，例如 '*.py'、'*.md'（空字串表示不限）
-            context_lines - 每個匹配前後顯示的行數（0–10，預設 3）
-            ignore_case   - 是否忽略大小寫（預設 False）
-            head_limit    - 輸出截斷行數（預設 250，0 表示不限制）
-            fixed_strings - True 表示純字串比對（不使用 regex，等同 rg -F）
+            pattern       — ripgrep 正則表達式（或 fixed_strings=True 時為純字串）
+                            範例：'TODO'、'def \\w+'、'import os'
+            path          — 要搜尋的絕對路徑（必須在 allowed_paths 範圍內）
+                            請從 cmd_list_allowed_paths 或 cmd_workspace_context 取得有效路徑
+            glob          — 檔案過濾 glob，例如 '*.py'、'*.{ts,tsx}'（空字串 = 不限）
+            context_lines — 每個匹配前後顯示的行數（0–10，預設 3）
+            ignore_case   — 是否忽略大小寫（預設 False）
+            head_limit    — 輸出截斷行數（預設 250；0 = 不限）
+            fixed_strings — True 表示純字串比對（停用 regex，等同 rg -F）
+
+        輸出格式（純文字）：
+            <檔案名稱>
+            <行號>:<匹配行>
+            <上下文行>
+            --          （匹配之間的分隔符）
+
+        無匹配時回傳以 [NO MATCH] 開頭的說明字串。
+        錯誤時回傳以 [ERROR] 開頭的說明字串。
+
+        建議：內容搜尋請優先用 grep_files（比 fs_search_files 更快且有上下文）；
+              只需搜尋檔名時才使用 fs_search_files。
         """
         search_path = Path(path).resolve()
         if not any(search_path == base or base in search_path.parents for base in allowed_paths):
-            return "錯誤：路徑不在允許的目錄範圍內"
+            return "[ERROR] 路徑不在允許範圍內。請用 cmd_list_allowed_paths 取得有效路徑。"
 
         if not search_path.exists():
-            return f"錯誤：路徑不存在：{path}"
+            return f"[ERROR] 路徑不存在：{path}"
 
         context_lines = max(0, min(10, context_lines))
         cmd: list[str] = [rg_path, "--color=never", "--heading", "--line-number"]
@@ -444,12 +533,12 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
         except subprocess.TimeoutExpired:
-            return "錯誤：搜尋超時（30 秒）"
+            return "[ERROR] 搜尋超時（30 秒）。請縮小搜尋路徑或加上 glob 過濾。"
 
         if result.returncode == 2:
-            return f"錯誤：{(result.stderr or '').strip() or '執行 rg 失敗'}"
+            return f"[ERROR] {(result.stderr or '').strip() or '執行 rg 失敗'}"
         if result.returncode == 1:
-            return f"無匹配結果（pattern={pattern!r}）"
+            return f"[NO MATCH] pattern={pattern!r} 在 {path} 中無符合結果"
 
         lines = (result.stdout or "").splitlines()
         if head_limit > 0 and len(lines) > head_limit:
@@ -475,7 +564,26 @@ def build_app(
     """組裝 FastMCP proxy 並回傳 ASGI app。"""
 
     # 1. 建立主 proxy 伺服器，掛載 gitignore middleware（每次 tool call 動態讀取 .gitignore）
-    proxy = FastMCP(name="MCP Unified Proxy", middleware=[GitignoreExcludeMiddleware(allowed_paths)])
+    _instructions = """\
+此伺服器提供工作區存取，整合了以下工具命名空間：
+
+- fs_*                  ：讀寫檔案、列目錄、搜尋檔名（來自 @modelcontextprotocol/server-filesystem）
+- cmd_*                 ：執行白名單命令、列出可用命令與路徑、取得工作區概覽
+- grep_files            ：以 ripgrep 搜尋檔案內容（比 fs_search_files 更快且顯示上下文）
+- file_get_download_uri ：產生 10 分鐘有效的匿名 HTTP 下載連結
+
+建議的初始步驟：
+1. 呼叫 cmd_workspace_context 一次取得完整環境概覽（允許路徑、命令清單、頂層目錄）
+2. 使用 grep_files 搜尋內容，fs_directory_tree 展開子目錄
+3. 以 cmd_run_command 執行命令（命令字串必須完全符合白名單）
+
+讀取文字檔請用 fs_read_file；只有需要產生 HTTP 下載連結時才用 file_get_download_uri。
+"""
+    proxy = FastMCP(
+        name="MCP Unified Proxy",
+        instructions=_instructions,
+        middleware=[GitignoreExcludeMiddleware(allowed_paths)],
+    )
 
     # 2. 掛載 filesystem MCP（透過 npx stdio 子程序）
     fs_args = [str(p) for p in allowed_paths]
