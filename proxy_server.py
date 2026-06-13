@@ -47,7 +47,10 @@ logger = logging.getLogger(__name__)
 # ── Gitignore 排除 middleware ──────────────────────────────────────────────────
 
 # 會自動注入 excludePatterns 的工具名稱（含 fs namespace 前綴）
-_TOOLS_WITH_EXCLUDE = {"fs_search_files", "fs_directory_tree"}
+_TOOLS_WITH_EXCLUDE = {"fs_directory_tree"}
+
+# 被自訂工具取代、應從 agent 工具清單中隱藏的 fs_* 工具
+_FS_TOOLS_EXCLUDED = {"fs_read_file", "fs_read_text_file", "fs_search_files"}
 
 
 def _gitignore_to_minimatch(pattern: str) -> list[str]:
@@ -100,6 +103,26 @@ class GitignoreExcludeMiddleware(Middleware):
                 new_args = {**(params.arguments or {}), "excludePatterns": merged}
                 new_params = mt.CallToolRequestParams(name=params.name, arguments=new_args)
                 context = context.copy(message=new_params)
+        return await call_next(context)
+
+
+class ToolFilterMiddleware(Middleware):
+    """隱藏被自訂工具取代的 fs_* 工具，讓 agent 不再看到已棄用或已被取代的工具。"""
+
+    async def on_list_tools(self, context, call_next):
+        tools = await call_next(context)
+        return [t for t in tools if t.name not in _FS_TOOLS_EXCLUDED]
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        if context.message.name in _FS_TOOLS_EXCLUDED:
+            raise ValueError(
+                f"工具 '{context.message.name}' 已停用。"
+                f"請改用：read_file（讀取文字）、glob_files（搜尋檔名）。"
+            )
         return await call_next(context)
 
 
@@ -205,14 +228,6 @@ def _build_cmd_server(
 
     @cmd_mcp.tool()
     def run_command(command: str) -> dict[str, Any]:
-        f"""執行白名單中允許的命令（跨平台：Windows 使用 PowerShell，其他平台使用 sh）。
-
-允許的命令：
-{whitelist_doc}
-
-安全機制：只允許執行完全符合白名單的命令（不支援模糊比對）。
-工作目錄為各 allowed_path。
-        """
         if command not in whitelist:
             return {
                 "success": False,
@@ -241,9 +256,37 @@ def _build_cmd_server(
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+    _cwd_display = str(allowed_paths[0]) if allowed_paths else "（無）"
+    run_command.__doc__ = f"""執行白名單中的命令（Windows 使用 PowerShell，其他平台使用 /bin/sh）。
+
+工作目錄：{_cwd_display}（第一個 allowed_path）
+
+允許的命令：
+{whitelist_doc}
+
+回傳值（dict）：
+  success    (bool) — returncode == 0 時為 True
+  returncode (int)  — shell 結束碼
+  stdout     (str)  — 標準輸出內容
+  stderr     (str)  — 標準錯誤內容
+
+失敗時回傳：{{"success": false, "error": "<原因>"}}
+
+注意：命令必須與白名單完全符合，不支援模糊比對。
+若不確定有哪些命令可用，請先呼叫 cmd_list_allowed_commands 或 cmd_workspace_context。
+"""
+
     @cmd_mcp.tool()
     def list_allowed_commands() -> dict[str, Any]:
-        """列出目前白名單中所有允許執行的命令。"""
+        """列出白名單中所有允許執行的命令。
+
+        若不確定 cmd_run_command 可以執行哪些命令，請先呼叫此工具。
+        （也可呼叫 cmd_workspace_context 一次取得路徑 + 命令 + 目錄結構）
+
+        回傳值（dict）：
+          allowed_commands : list[{command, description}] — 所有可用命令及其說明
+          total            : int — 命令總數
+        """
         items = []
         for cmd in whitelist:
             items.append({
@@ -254,8 +297,45 @@ def _build_cmd_server(
 
     @cmd_mcp.tool()
     def list_allowed_paths() -> dict[str, Any]:
-        """列出此 proxy 允許存取的所有目錄路徑。"""
+        """列出此 proxy 允許存取的所有目錄路徑。
+
+        回傳值（dict）：
+          allowed_paths : list[str] — 可存取的絕對路徑清單
+
+        請將這些路徑作為 read_file / grep_files / glob_files 的 path 參數起點，
+        或傳入 fs_directory_tree 展開目錄結構。
+        """
         return {"allowed_paths": [str(p) for p in allowed_paths]}
+
+    @cmd_mcp.tool()
+    def workspace_context() -> dict[str, Any]:
+        """取得完整工作區概覽，供 agent 初始定向使用。
+
+        第一次連線時請優先呼叫此工具，可一次取得：
+          allowed_paths    : list[str]                     — 此伺服器可存取的根目錄
+          allowed_commands : list[{command, description}]  — 可執行的白名單命令
+          directory_trees  : dict[path, list[str]]         — 各根目錄的頂層子項目
+
+        取得概覽後，可用 read_file 讀取文字檔、grep_files 搜尋內容、
+        glob_files 搜尋檔名、fs_directory_tree 展開目錄、cmd_run_command 執行命令。
+        """
+        trees: dict[str, list[str]] = {}
+        for base in allowed_paths:
+            try:
+                children = sorted(str(p.relative_to(base)) for p in base.iterdir())
+            except Exception:
+                children = []
+            trees[str(base)] = children
+
+        items = [
+            {"command": cmd, "description": cmd_descriptions.get(cmd, "")}
+            for cmd in whitelist
+        ]
+        return {
+            "allowed_paths": [str(p) for p in allowed_paths],
+            "allowed_commands": items,
+            "directory_trees": trees,
+        }
 
     return cmd_mcp
 
@@ -285,10 +365,28 @@ def _build_file_server(
 
     @file_mcp.tool()
     def get_download_uri(file_path: str, ctx: Context) -> dict[str, Any]:
-        """產生指定檔案的臨時下載 URI（10 分鐘有效），供遠端 agent 直接 HTTP 下載。
+        """產生指定檔案的臨時 HTTP 下載 URI（10 分鐘有效），供遠端 agent 或使用者直接下載。
 
-        file_path 必須在允許的目錄（allowed_paths）之內。
+        適用情境：
+          - 檔案為二進位格式（圖片、壓縮檔、PDF）—— 無法以文字讀取
+          - 需要讓使用者或另一個服務透過 HTTP 下載（wget / curl / 瀏覽器）
+          - 檔案過大，直接讀取會超出 context 限制
+
+        請勿用於讀取文字檔 —— 直接用 read_file 即可。
+
+        file_path 必須為絕對路徑且在 allowed_paths 範圍內。
+        請從 cmd_list_allowed_paths 或 cmd_workspace_context 取得有效的根路徑。
         回傳的 uri 可直接以 wget / curl / requests.get 下載，不需附帶 Authorization header。
+
+        成功回傳（dict）：
+          success            (bool) — True
+          uri                (str)  — HTTP 下載網址，有效期間為 expires_in_seconds 秒
+          expires_in_seconds (int)  — 600（10 分鐘）
+          file_name          (str)  — 檔案名稱
+
+        失敗回傳（dict）：
+          success (bool) — False
+          error   (str)  — 失敗原因
         """
         _purge_expired_tokens()
 
@@ -321,6 +419,60 @@ def _build_file_server(
         }
 
     return file_mcp
+
+
+# ── 增強文字讀取工具（取代 fs_read_text_file）────────────────────────────────────
+
+def _build_read_server(allowed_paths: list[Path]) -> FastMCP:
+    """建立帶行號、支援 offset/limit 的文字讀取工具。"""
+    read_mcp = FastMCP(name="增強文字讀取器")
+
+    @read_mcp.tool()
+    def read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
+        """讀取文字檔，回傳帶行號的內容（對齊 CC Read 工具）。
+
+        此工具取代 fs_read_text_file，提供行號輸出與任意行範圍支援。
+        二進位檔案（圖片、音訊）請改用 fs_read_media_file。
+
+        參數：
+          path   — 絕對路徑（從 cmd_workspace_context 取得根路徑）
+          offset — 起始行（0-indexed，預設 0 = 從第一行）
+          limit  — 讀取行數（預設 0 = 全部；大型檔案建議設定此值）
+
+        成功回傳（dict）：
+          file_path   (str)  — 讀取的絕對路徑
+          content     (str)  — 帶行號內容，格式："{行號}\\t{該行內容}"
+          num_lines   (int)  — 本次回傳行數
+          start_line  (int)  — 起始行號（1-indexed）
+          total_lines (int)  — 檔案總行數（供判斷是否已讀完整個檔案）
+
+        失敗回傳（dict）：
+          error (str) — 失敗原因（以 [ERROR] 開頭）
+        """
+        file_path = Path(path).resolve()
+        if not any(file_path == base or base in file_path.parents for base in allowed_paths):
+            return {"error": "[ERROR] 路徑不在允許範圍內。請用 cmd_list_allowed_paths 取得有效路徑。"}
+        if not file_path.is_file():
+            return {"error": f"[ERROR] 檔案不存在：{path}"}
+        try:
+            all_lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception as exc:
+            return {"error": f"[ERROR] 讀取失敗：{exc}"}
+
+        total_lines = len(all_lines)
+        chunk = all_lines[offset: (offset + limit) if limit else None]
+        start_line = offset + 1  # 1-indexed，與 CC Read 一致
+        content = "\n".join(f"{start_line + i}\t{line}" for i, line in enumerate(chunk))
+
+        return {
+            "file_path": str(file_path),
+            "content": content,
+            "num_lines": len(chunk),
+            "start_line": start_line,
+            "total_lines": total_lines,
+        }
+
+    return read_mcp
 
 
 # ── ripgrep 自動安裝 ──────────────────────────────────────────────────────────
@@ -397,67 +549,244 @@ def _ensure_ripgrep() -> str:
     return str(local_rg)
 
 
-# ── 檔案內容搜尋工具（ripgrep）────────────────────────────────────────────────
+# ── 檔案內容搜尋與檔名搜尋工具（ripgrep）────────────────────────────────────────
+
+# 自動排除的版本控制目錄 glob（rg 預設也會排除 .git，這裡明確加上其他 VCS）
+_VCS_EXCLUDE_GLOBS = ["!.svn", "!.hg", "!.jj", "!.bzr"]
+
 
 def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
-    """建立以 ripgrep 提供檔案內容搜尋功能的 FastMCP 子伺服器。"""
-    grep_mcp = FastMCP(name="檔案內容搜尋器")
+    """建立以 ripgrep 提供檔案內容搜尋（grep_files）與檔名搜尋（glob_files）的子伺服器。"""
+    grep_mcp = FastMCP(name="ripgrep 搜尋工具")
 
     @grep_mcp.tool()
     def grep_files(
         pattern: str,
         path: str,
+        output_mode: str = "content",
         glob: str = "",
-        context_lines: int = 3,
+        file_type: str = "",
+        context_lines: int = 0,
+        before_context: int = 0,
+        after_context: int = 0,
         ignore_case: bool = False,
         head_limit: int = 250,
+        offset: int = 0,
         fixed_strings: bool = False,
-    ) -> str:
-        """以 ripgrep 在允許目錄內搜尋檔案內容，回傳匹配行與上下文。
+        multiline: bool = False,
+    ) -> dict[str, Any]:
+        """以 ripgrep 搜尋檔案內容（對齊 CC Grep 工具）。自動排除 VCS 目錄（.git 等）。
 
         參數：
-            pattern       - 搜尋的正則表達式（ripgrep 語法），例如 'TODO' 或 'fn \\w+'
-            path          - 要搜尋的檔案或目錄（必須在 allowed_paths 範圍內）
-            glob          - 檔案過濾 glob，例如 '*.py'、'*.md'（空字串表示不限）
-            context_lines - 每個匹配前後顯示的行數（0–10，預設 3）
-            ignore_case   - 是否忽略大小寫（預設 False）
-            head_limit    - 輸出截斷行數（預設 250，0 表示不限制）
-            fixed_strings - True 表示純字串比對（不使用 regex，等同 rg -F）
+          pattern        — 搜尋的正則表達式（或 fixed_strings=True 時為純字串）
+                           範例：'TODO'、'def \\w+'、'import os'
+          path           — 要搜尋的絕對路徑（必須在 allowed_paths 範圍內）
+                           請從 cmd_workspace_context 取得有效路徑
+          output_mode    — 輸出模式（預設 "content"）：
+                           "content"           — 回傳匹配行與上下文（純文字）
+                           "files_with_matches"— 只回傳有匹配的檔案清單
+                           "count"             — 回傳各檔案的匹配數量
+          glob           — 檔案過濾 glob，例如 '*.py'、'*.{ts,tsx}'（空字串 = 不限）
+          file_type      — ripgrep 檔案類型，例如 'py'、'ts'、'rust'（空字串 = 不限）
+                           比 glob 更簡潔；可用 rg --type-list 查詢支援的類型
+          context_lines  — 匹配前後對稱顯示行數（等同 -C，預設 0）
+          before_context — 匹配前顯示行數（等同 -B，預設 0）
+          after_context  — 匹配後顯示行數（等同 -A，預設 0）
+          ignore_case    — 忽略大小寫（預設 False）
+          head_limit     — 輸出截斷行數/筆數（預設 250；0 = 不限）
+          offset         — 跳過前 N 行結果（分頁用，預設 0）
+          fixed_strings  — True 表示純字串比對（停用 regex，等同 rg -F）
+          multiline      — 啟用多行模式（. 可匹配換行，預設 False）
+
+        回傳（dict）— 依 output_mode：
+
+        output_mode="content"：
+          mode          (str)       — "content"
+          num_files     (int)       — 匹配到的檔案數
+          filenames     (list[str]) — 匹配到的檔案路徑清單
+          content       (str)       — 匹配行與上下文（純文字）
+          num_lines     (int)       — 本次回傳行數
+          applied_limit (int)       — 實際套用的 head_limit（0 表示未截斷）
+          applied_offset (int)      — 實際套用的 offset
+
+        output_mode="files_with_matches"：
+          mode      (str)       — "files_with_matches"
+          num_files (int)       — 匹配到的檔案數
+          filenames (list[str]) — 匹配到的檔案路徑清單
+
+        output_mode="count"：
+          mode        (str)       — "count"
+          num_matches (int)       — 全部匹配總數
+          per_file    (list[dict])— 各檔案的 {file, count}
+
+        錯誤時回傳：{"error": "[ERROR] <原因>"}
+        無匹配時回傳：{"mode": ..., "num_files": 0, ...（其他欄位為空）}
         """
         search_path = Path(path).resolve()
         if not any(search_path == base or base in search_path.parents for base in allowed_paths):
-            return "錯誤：路徑不在允許的目錄範圍內"
-
+            return {"error": "[ERROR] 路徑不在允許範圍內。請用 cmd_list_allowed_paths 取得有效路徑。"}
         if not search_path.exists():
-            return f"錯誤：路徑不存在：{path}"
+            return {"error": f"[ERROR] 路徑不存在：{path}"}
 
-        context_lines = max(0, min(10, context_lines))
-        cmd: list[str] = [rg_path, "--color=never", "--heading", "--line-number"]
-        cmd += [f"--context={context_lines}"]
+        # 建立 rg 指令
+        cmd: list[str] = [rg_path, "--color=never"]
+
+        if output_mode == "files_with_matches":
+            cmd.append("--files-with-matches")
+        elif output_mode == "count":
+            cmd.append("--count")
+        else:
+            cmd += ["--heading", "--line-number"]
+            if context_lines > 0:
+                cmd += [f"--context={max(0, min(10, context_lines))}"]
+            else:
+                if before_context > 0:
+                    cmd += [f"--before-context={max(0, min(10, before_context))}"]
+                if after_context > 0:
+                    cmd += [f"--after-context={max(0, min(10, after_context))}"]
+
         if ignore_case:
             cmd.append("--ignore-case")
         if fixed_strings:
             cmd.append("--fixed-strings")
+        if multiline:
+            cmd += ["--multiline", "--multiline-dotall"]
         if glob:
             cmd += ["--glob", glob]
+        if file_type:
+            cmd += ["--type", file_type]
+        for vcs_glob in _VCS_EXCLUDE_GLOBS:
+            cmd += ["--glob", vcs_glob]
+
         cmd += [pattern, str(search_path)]
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
         except subprocess.TimeoutExpired:
-            return "錯誤：搜尋超時（30 秒）"
+            return {"error": "[ERROR] 搜尋超時（30 秒）。請縮小搜尋路徑或加上 glob / file_type 過濾。"}
 
         if result.returncode == 2:
-            return f"錯誤：{(result.stderr or '').strip() or '執行 rg 失敗'}"
-        if result.returncode == 1:
-            return f"無匹配結果（pattern={pattern!r}）"
+            return {"error": f"[ERROR] {(result.stderr or '').strip() or '執行 rg 失敗'}"}
 
-        lines = (result.stdout or "").splitlines()
+        # 無匹配（returncode == 1）
+        if result.returncode == 1:
+            if output_mode == "files_with_matches":
+                return {"mode": "files_with_matches", "num_files": 0, "filenames": []}
+            elif output_mode == "count":
+                return {"mode": "count", "num_matches": 0, "per_file": []}
+            else:
+                return {"mode": "content", "num_files": 0, "filenames": [],
+                        "content": "", "num_lines": 0, "applied_limit": 0, "applied_offset": offset}
+
+        stdout = result.stdout or ""
+
+        # ── files_with_matches ──────────────────────────────────────────────
+        if output_mode == "files_with_matches":
+            filenames = [f for f in stdout.splitlines() if f]
+            if head_limit > 0:
+                filenames = filenames[offset: offset + head_limit]
+            elif offset:
+                filenames = filenames[offset:]
+            return {"mode": "files_with_matches", "num_files": len(filenames), "filenames": filenames}
+
+        # ── count ────────────────────────────────────────────────────────────
+        if output_mode == "count":
+            per_file = []
+            total = 0
+            for line in stdout.splitlines():
+                if ":" in line:
+                    fname, _, cnt = line.rpartition(":")
+                    try:
+                        c = int(cnt)
+                        per_file.append({"file": fname, "count": c})
+                        total += c
+                    except ValueError:
+                        pass
+            return {"mode": "count", "num_matches": total, "per_file": per_file}
+
+        # ── content ──────────────────────────────────────────────────────────
+        lines = stdout.splitlines()
+        # 解析 heading 行取得 filenames（heading 格式下，無 : 的非空行為檔案名稱）
+        filenames = [l for l in lines if l and ":" not in l and not l.startswith("-")]
+        # 套用 offset + head_limit
+        if offset:
+            lines = lines[offset:]
+        applied_limit = 0
         if head_limit > 0 and len(lines) > head_limit:
             lines = lines[:head_limit]
-            lines.append(f"--- 輸出已截斷（前 {head_limit} 行），請縮小搜尋範圍或使用 glob 過濾 ---")
+            lines.append(f"--- 輸出已截斷（offset={offset}, limit={head_limit}），請縮小搜尋範圍或使用 glob 過濾 ---")
+            applied_limit = head_limit
 
-        return "\n".join(lines)
+        return {
+            "mode": "content",
+            "num_files": len(set(filenames)),
+            "filenames": list(dict.fromkeys(filenames)),
+            "content": "\n".join(lines),
+            "num_lines": len(lines),
+            "applied_limit": applied_limit,
+            "applied_offset": offset,
+        }
+
+    @grep_mcp.tool()
+    def glob_files(
+        pattern: str,
+        path: str = "",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """以 ripgrep 搜尋符合 glob pattern 的檔名，結果依修改時間排序（最新在前）。
+
+        取代 fs_search_files。自動尊重 .gitignore（由 ripgrep 原生處理）。
+
+        參數：
+          pattern — glob pattern，例如 '**/*.py'、'src/**/*.ts'、'*.json'
+          path    — 搜尋根目錄（空字串 = 第一個 allowed_path）
+                    請從 cmd_workspace_context 取得有效路徑
+          limit   — 結果上限（預設 100）
+
+        回傳（dict）：
+          num_files  (int)       — 實際匹配到的檔案總數（截斷前）
+          filenames  (list[str]) — 絕對路徑清單（依修改時間降序，最新在前）
+          truncated  (bool)      — 結果是否被 limit 截斷
+
+        錯誤時回傳：{"error": "[ERROR] <原因>"}
+        """
+        if not path:
+            search_path = allowed_paths[0] if allowed_paths else Path.cwd()
+        else:
+            search_path = Path(path).resolve()
+
+        if not any(search_path == base or base in search_path.parents for base in allowed_paths):
+            return {"error": "[ERROR] 路徑不在允許範圍內。請用 cmd_list_allowed_paths 取得有效路徑。"}
+        if not search_path.exists():
+            return {"error": f"[ERROR] 路徑不存在：{path or str(search_path)}"}
+
+        cmd = [rg_path, "--files", "--glob", pattern, str(search_path)]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        except subprocess.TimeoutExpired:
+            return {"error": "[ERROR] 搜尋超時（30 秒）。請縮小搜尋路徑或使用更具體的 pattern。"}
+
+        if result.returncode == 2:
+            return {"error": f"[ERROR] {(result.stderr or '').strip() or '執行 rg 失敗'}"}
+
+        filenames = [f for f in (result.stdout or "").splitlines() if f]
+
+        # 依修改時間降序排列
+        def _mtime(p: str) -> float:
+            try:
+                return os.path.getmtime(p)
+            except OSError:
+                return 0.0
+
+        filenames.sort(key=_mtime, reverse=True)
+
+        total = len(filenames)
+        truncated = total > limit
+        if truncated:
+            filenames = filenames[:limit]
+
+        return {"num_files": total, "filenames": filenames, "truncated": truncated}
 
     return grep_mcp
 
@@ -532,8 +861,42 @@ def build_app(
 ) -> Any:
     """組裝 FastMCP proxy 並回傳 ASGI app。"""
 
-    # 1. 建立主 proxy 伺服器，掛載 gitignore middleware（每次 tool call 動態讀取 .gitignore）
-    proxy = FastMCP(name="MCP Unified Proxy", middleware=[GitignoreExcludeMiddleware(allowed_paths)])
+    # 1. 建立主 proxy 伺服器
+    _instructions = """\
+此伺服器提供工作區存取，整合了以下工具：
+
+讀寫與搜尋（自訂，對齊 CC 工具）：
+- read_file             ：讀取文字檔，帶行號輸出，支援 offset+limit 任意行範圍
+- grep_files            ：以 ripgrep 搜尋檔案內容，支援 output_mode / 前後文 / 類型過濾
+- glob_files            ：以 ripgrep 搜尋檔名，依修改時間排序，尊重 .gitignore
+
+檔案系統（fs_*，來自 @modelcontextprotocol/server-filesystem）：
+- fs_write_file / fs_edit_file ：寫入 / 精確字串替換
+- fs_directory_tree / fs_list_directory ：目錄展開
+- fs_read_media_file   ：讀取圖片/音訊（base64）
+- fs_get_file_info / fs_move_file 等其他工具
+
+命令執行（cmd_*）：
+- cmd_workspace_context ：一次取得路徑 + 命令 + 目錄結構（建議先呼叫）
+- cmd_run_command       ：執行白名單命令
+- cmd_list_allowed_commands / cmd_list_allowed_paths
+
+其他：
+- file_get_download_uri ：產生 10 分鐘有效的匿名 HTTP 下載連結
+
+建議的初始步驟：
+1. 呼叫 cmd_workspace_context 取得完整環境概覽
+2. 用 read_file 讀取文字檔，grep_files 搜尋內容，glob_files 搜尋檔名
+3. 用 cmd_run_command 執行命令（必須完全符合白名單）
+
+讀取文字檔請用 read_file（不是 fs_read_text_file，該工具已停用）。
+產生 HTTP 下載連結才用 file_get_download_uri。
+"""
+    proxy = FastMCP(
+        name="MCP Unified Proxy",
+        instructions=_instructions,
+        middleware=[ToolFilterMiddleware(), GitignoreExcludeMiddleware(allowed_paths)],
+    )
 
     # 2. 掛載 filesystem MCP（透過 npx stdio 子程序）
     fs_args = [str(p) for p in allowed_paths]
@@ -553,9 +916,13 @@ def build_app(
     file_server = _build_file_server(allowed_paths, host, port)
     proxy.mount(file_server, namespace="file")
 
-    # 5. 掛載檔案內容搜尋工具（ripgrep）
+    # 5. 掛載增強文字讀取工具（無 namespace → 工具名稱直接是 read_file）
+    read_server = _build_read_server(allowed_paths)
+    proxy.mount(read_server)
+
+    # 6. 掛載 ripgrep 搜尋工具（無 namespace → 工具名稱直接是 grep_files / glob_files）
     grep_server = _build_grep_server(allowed_paths, rg_path)
-    proxy.mount(grep_server, namespace="grep")
+    proxy.mount(grep_server)
 
     # 6. 掛載 markitdown 檔案轉換工具
     markitdown_server = _build_markitdown_server(allowed_paths)
