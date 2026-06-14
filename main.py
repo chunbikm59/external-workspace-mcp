@@ -1,11 +1,11 @@
 """
-MCP Unified Proxy Server
+MCP Workspace Server
 
 整合 @modelcontextprotocol/server-filesystem 與命令白名單執行工具，
 共享同一份 allowed_paths。
 
 啟動方式：
-    python proxy_server.py [--host HOST] [--port PORT] [--bearer-token TOKEN] [--config PATH]
+    python main.py [--host HOST] [--port PORT] [--bearer-token TOKEN] [--config PATH]
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def build_app(
     whitelist_filename: str = DEFAULT_WHITELIST_FILENAME,
     rg_path: str = "rg",
 ) -> Any:
-    """組裝 FastMCP proxy 並回傳 ASGI app。"""
+    """組裝 FastMCP 伺服器並回傳 ASGI app。"""
 
     _instructions = """\
 此伺服器提供工作區存取，整合了以下工具：
@@ -92,7 +92,7 @@ def build_app(
 產生 HTTP 下載連結才用 file_get_download_uri。
 """
     proxy = FastMCP(
-        name="MCP Unified Proxy",
+        name="MCP Workspace Server",
         instructions=_instructions,
         middleware=[ToolFilterMiddleware(), GitignoreExcludeMiddleware(allowed_paths)],
     )
@@ -170,7 +170,7 @@ def build_app(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MCP Unified Proxy Server")
+    parser = argparse.ArgumentParser(description="MCP Workspace Server")
     parser.add_argument("--host", default=None, help=f"監聽位址（預設 {DEFAULT_HOST}）")
     parser.add_argument("--port", type=int, default=None, help=f"監聽埠號（預設 {DEFAULT_PORT}）")
     parser.add_argument("--bearer-token", default=None, help="Bearer Token（不設定則不驗證）")
@@ -202,7 +202,7 @@ def main() -> None:
         allowed_paths = _resolve_allowed_paths(config)
     whitelist = _load_whitelist(allowed_paths, whitelist_filename)
 
-    print(f"[INFO] MCP Unified Proxy 啟動中")
+    print(f"[INFO] MCP Workspace Server 啟動中")
     print(f"[INFO] 監聽：http://{host}:{port}/mcp")
     print(f"[INFO] 健康檢查：http://{host}:{port}/health")
     print(f"[INFO] Allowed paths：{[str(p) for p in allowed_paths]}")

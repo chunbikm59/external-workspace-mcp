@@ -24,10 +24,11 @@ def _load_config(cli_config: str | None) -> dict[str, Any]:
     if cli_config:
         candidates.append(Path(cli_config))
     else:
-        env_path = os.environ.get("MCP_PROXY_CONFIG")
+        env_path = os.environ.get("MCP_SERVER_CONFIG") or os.environ.get("MCP_PROXY_CONFIG")
         if env_path:
             candidates.append(Path(env_path))
         cwd = Path.cwd()
+        candidates.append(cwd / ".mcp-server.json")
         candidates.append(cwd / ".mcp-proxy.json")
         candidates.append(cwd / "config" / "config.json")
 

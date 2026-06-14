@@ -1,6 +1,6 @@
 # external-workspace-mcp
 
-一個整合式 MCP（Model Context Protocol）Proxy 伺服器，將檔案系統存取、命令白名單執行、檔案下載、內容搜尋與文件轉換功能統一透過單一 HTTP 端點提供給遠端 AI agent 使用。
+讓遠端 AI agent 透過 MCP 協定直接存取本機工作區——讀寫檔案、在本機執行命令、搜尋內容、轉換文件，省去手動傳遞檔案內容的往返。
 
 ## 功能概覽
 
@@ -37,9 +37,9 @@ pip install -r requirements.txt
 
 ## 設定
 
-### 設定檔 `.mcp-proxy.json`
+### 設定檔 `.mcp-server.json`
 
-在工作目錄建立 `.mcp-proxy.json`（或以 `--config` 指定路徑）：
+在工作目錄建立 `.mcp-server.json`（或以 `--config` 指定路徑）：
 
 ```json
 {
@@ -59,7 +59,7 @@ pip install -r requirements.txt
 | `bearer-token` | （不驗證）| 設定後所有請求需附帶 `Authorization: Bearer <token>` |
 | `whitelist-filename` | `.cmd_whitelist.json` | 命令白名單檔案名稱 |
 
-設定檔搜尋順序：`--config` 引數 → `MCP_PROXY_CONFIG` 環境變數 → `<cwd>/.mcp-proxy.json` → `<cwd>/config/config.json`
+設定檔搜尋順序：`--config` 引數 → `MCP_SERVER_CONFIG` 環境變數 → `<cwd>/.mcp-server.json` → `<cwd>/config/config.json`
 
 ### 命令白名單 `.cmd_whitelist.json`
 
@@ -84,16 +84,16 @@ pip install -r requirements.txt
 
 ```bash
 # 使用設定檔（自動搜尋 .mcp-proxy.json）
-python proxy_server.py
+python main.py
 
 # 指定參數
-python proxy_server.py --host 0.0.0.0 --port 8100 --bearer-token mysecret
+python main.py --host 0.0.0.0 --port 8100 --bearer-token mysecret
 
 # 指定允許路徑（覆蓋設定檔）
-python proxy_server.py --allowed-paths D:/project1 D:/project2
+python main.py --allowed-paths D:/project1 D:/project2
 
 # 指定設定檔路徑
-python proxy_server.py --config /path/to/config.json
+python main.py --config /path/to/config.json
 ```
 
 啟動後可用的端點：
@@ -118,12 +118,12 @@ python proxy_server.py --config /path/to/config.json
 
 ```
 external-workspace-mcp/
-├── proxy_server.py        # 主程式：組裝 proxy、路由、middleware、啟動 uvicorn
+├── main.py                # 主程式：組裝伺服器、路由、middleware、啟動 uvicorn
 ├── config.py              # 設定載入、白名單解析、shell 命令建構
 ├── middleware.py           # GitignoreExcludeMiddleware、ToolFilterMiddleware
 ├── servers.py             # 各子伺服器工具定義（cmd/file/read/grep/markitdown）
 ├── ripgrep.py             # ripgrep binary 自動下載與管理
-├── .mcp-proxy.json        # 伺服器設定
+├── .mcp-server.json       # 伺服器設定
 ├── .cmd_whitelist.json    # 命令白名單（範例）
 ├── requirements.txt       # Python 依賴
 └── bin/                   # ripgrep binary 自動下載位置（建議加入 .gitignore）
