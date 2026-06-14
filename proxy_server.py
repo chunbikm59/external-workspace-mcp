@@ -78,7 +78,7 @@ def build_app(
 命令執行（cmd_*）：
 - cmd_workspace_context ：一次取得路徑 + 命令 + 目錄結構（建議先呼叫）
 - cmd_run_command       ：執行白名單命令
-- cmd_list_allowed_commands / cmd_list_allowed_paths
+- cmd_list_allowed_commands
 
 其他：
 - file_get_download_uri ：產生 10 分鐘有效的匿名 HTTP 下載連結

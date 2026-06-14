@@ -74,8 +74,13 @@ class ToolFilterMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         if context.message.name in _FS_TOOLS_EXCLUDED:
+            alternatives = {
+                "fs_read_file": "read_file",
+                "fs_read_text_file": "read_file",
+                "fs_search_files": "glob_files",
+            }
+            alt = alternatives.get(context.message.name, "read_file")
             raise ValueError(
-                f"工具 '{context.message.name}' 已停用。"
-                f"請改用：read_file（讀取文字）、glob_files（搜尋檔名）。"
+                f"工具 '{context.message.name}' 已停用。請改用：{alt}。"
             )
         return await call_next(context)

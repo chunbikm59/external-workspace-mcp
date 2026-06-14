@@ -159,13 +159,6 @@ def _build_cmd_server(
         return {"allowed_commands": items, "total": len(items)}
 
     @cmd_mcp.tool()
-    def list_allowed_paths() -> dict[str, Any]:
-        """列出此伺服器允許存取的目錄路徑。
-        作為 read_file / grep_files / glob_files / fs_directory_tree 的 path 起點。
-        """
-        return {"allowed_paths": [str(p) for p in allowed_paths]}
-
-    @cmd_mcp.tool()
     def workspace_context() -> dict[str, Any]:
         """一次取得完整工作區概覽：可存取的路徑、可執行的命令、各根目錄頂層結構。
         連線後第一步請呼叫此工具完成定向。
@@ -336,7 +329,7 @@ def _build_read_server(allowed_paths: list[Path]) -> FastMCP:
         """
         file_path = Path(path).resolve()
         if not any(file_path == base or base in file_path.parents for base in allowed_paths):
-            return {"error": "[ERROR] 路徑不在允許範圍內。請用 cmd_list_allowed_paths 取得有效路徑。"}
+            return {"error": "[ERROR] 路徑不在允許範圍內。請用 fs_list_allowed_directories 取得有效路徑。"}
         if not file_path.is_file():
             return {"error": f"[ERROR] 檔案不存在：{path}"}
         try:
@@ -386,7 +379,7 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
         """
         search_path = Path(path).resolve()
         if not any(search_path == base or base in search_path.parents for base in allowed_paths):
-            return {"error": "[ERROR] 路徑不在允許範圍內。請用 cmd_list_allowed_paths 取得有效路徑。"}
+            return {"error": "[ERROR] 路徑不在允許範圍內。請用 fs_list_allowed_directories 取得有效路徑。"}
         if not search_path.exists():
             return {"error": f"[ERROR] 路徑不存在：{path}"}
 
@@ -498,7 +491,7 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
             search_path = Path(path).resolve()
 
         if not any(search_path == base or base in search_path.parents for base in allowed_paths):
-            return {"error": "[ERROR] 路徑不在允許範圍內。請用 cmd_list_allowed_paths 取得有效路徑。"}
+            return {"error": "[ERROR] 路徑不在允許範圍內。請用 fs_list_allowed_directories 取得有效路徑。"}
         if not search_path.exists():
             return {"error": f"[ERROR] 路徑不存在：{path or str(search_path)}"}
 
