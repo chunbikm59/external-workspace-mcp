@@ -25,7 +25,7 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import sys
 
@@ -34,6 +34,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.middleware.middleware import CallNext, ToolResult
 
 import uvicorn
+from pydantic import Field
 from fastmcp import FastMCP
 from fastmcp.server import create_proxy
 from fastmcp.server.context import Context
@@ -253,7 +254,10 @@ def _build_cmd_server(
     ) or "  （白名單為空）"
 
     @cmd_mcp.tool()
-    def run_command(command: str, fail_fast: bool = True) -> dict[str, Any]:
+    def run_command(
+        command: Annotated[str, Field(description="要執行的命令；可用 ';' 串接多個白名單命令，例如 'npm install; npm run build'")],
+        fail_fast: Annotated[bool, Field(description="串接命令模式下，若某步驟失敗是否立即停止")] = True,
+    ) -> dict[str, Any]:
         sub_commands = _parse_composite_command(command)
 
         if not sub_commands:
@@ -321,46 +325,19 @@ def _build_cmd_server(
 
     _cwd_display = str(allowed_paths[0]) if allowed_paths else "（無）"
     run_command.__doc__ = f"""執行白名單中的命令（Windows 使用 PowerShell，其他平台使用 /bin/sh）。
-支援以 ';' 串接多個白名單命令依序執行。
+可用 ';' 串接多個白名單命令依序執行。每個子命令必須完全符合白名單中的某一項，否則整批不執行。
+不確定有哪些命令可用時，請先呼叫 cmd_list_allowed_commands。
 
-工作目錄：{_cwd_display}（第一個 allowed_path）
+工作目錄：{_cwd_display}
 
 允許的命令：
 {whitelist_doc}
-
-參數：
-  command   (str)  — 要執行的命令；可用 ';' 串接多個白名單命令
-                      例如：'npm install; npm run build'
-  fail_fast (bool) — 組合命令模式下，若某步驟失敗是否立即停止（預設 True）
-
-單一命令回傳值（dict）：
-  success    (bool) — returncode == 0 時為 True
-  returncode (int)  — shell 結束碼
-  stdout     (str)  — 標準輸出內容
-  stderr     (str)  — 標準錯誤內容
-
-組合命令回傳值（dict）：
-  success           (bool)       — 所有已執行命令均成功時為 True
-  commands_executed (int)        — 實際執行的子命令數（fail_fast 下可能提前停止）
-  commands_total    (int)        — 全部子命令數
-  results           (list[dict]) — 每個子命令的 {{command, success, returncode/error, stdout, stderr}}
-
-失敗時回傳：{{"success": false, "error": "<原因>"}}
-
-注意：每個子命令都必須完全符合白名單中的某一項，否則整批命令都不會執行。
-若不確定有哪些命令可用，請先呼叫 cmd_list_allowed_commands 或 cmd_workspace_context。
 """
 
     @cmd_mcp.tool()
     def list_allowed_commands() -> dict[str, Any]:
-        """列出白名單中所有允許執行的命令。
-
-        若不確定 cmd_run_command 可以執行哪些命令，請先呼叫此工具。
-        （也可呼叫 cmd_workspace_context 一次取得路徑 + 命令 + 目錄結構）
-
-        回傳值（dict）：
-          allowed_commands : list[{command, description}] — 所有可用命令及其說明
-          total            : int — 命令總數
+        """列出所有可傳入 cmd_run_command 的白名單命令及說明。
+        不確定能執行哪些命令時呼叫此工具。
         """
         items = []
         for cmd in whitelist:
@@ -372,27 +349,15 @@ def _build_cmd_server(
 
     @cmd_mcp.tool()
     def list_allowed_paths() -> dict[str, Any]:
-        """列出此 proxy 允許存取的所有目錄路徑。
-
-        回傳值（dict）：
-          allowed_paths : list[str] — 可存取的絕對路徑清單
-
-        請將這些路徑作為 read_file / grep_files / glob_files 的 path 參數起點，
-        或傳入 fs_directory_tree 展開目錄結構。
+        """列出此伺服器允許存取的目錄路徑。
+        作為 read_file / grep_files / glob_files / fs_directory_tree 的 path 起點。
         """
         return {"allowed_paths": [str(p) for p in allowed_paths]}
 
     @cmd_mcp.tool()
     def workspace_context() -> dict[str, Any]:
-        """取得完整工作區概覽，供 agent 初始定向使用。
-
-        第一次連線時請優先呼叫此工具，可一次取得：
-          allowed_paths    : list[str]                     — 此伺服器可存取的根目錄
-          allowed_commands : list[{command, description}]  — 可執行的白名單命令
-          directory_trees  : dict[path, list[str]]         — 各根目錄的頂層子項目
-
-        取得概覽後，可用 read_file 讀取文字檔、grep_files 搜尋內容、
-        glob_files 搜尋檔名、fs_directory_tree 展開目錄、cmd_run_command 執行命令。
+        """一次取得完整工作區概覽：可存取的路徑、可執行的命令、各根目錄頂層結構。
+        連線後第一步請呼叫此工具完成定向。
         """
         trees: dict[str, list[str]] = {}
         for base in allowed_paths:
@@ -414,15 +379,8 @@ def _build_cmd_server(
 
     @cmd_mcp.tool()
     def reload_whitelist() -> dict[str, Any]:
-        """要求本機使用者確認後，重新載入白名單檔案並更新 in-memory 白名單。
-
-        呼叫後，proxy server 終端會暫停並顯示確認提示（含新命令清單），
-        等待本機使用者輸入 y/N。
-
-        回傳（dict）：
-          success  (bool) — True 表示已套用，False 表示使用者拒絕
-          message  (str)  — 結果說明
-          commands (list) — 套用後的白名單命令（僅 success=True 時）
+        """重新從磁碟載入白名單檔案；伺服器端會暫停並向本機使用者確認，待確認後才套用。
+        白名單檔案變更後（新增/移除命令）呼叫此工具。
         """
         new_cmds = _load_whitelist(allowed_paths, whitelist_filename)
 
@@ -526,29 +484,13 @@ def _build_file_server(
     file_mcp = FastMCP(name="檔案下載 URI 產生器")
 
     @file_mcp.tool()
-    def get_download_uri(file_path: str, ctx: Context) -> dict[str, Any]:
-        """產生指定檔案的臨時 HTTP 下載 URI（10 分鐘有效），供遠端 agent 或使用者直接下載。
-
-        適用情境：
-          - 檔案為二進位格式（圖片、壓縮檔、PDF）—— 無法以文字讀取
-          - 需要讓使用者或另一個服務透過 HTTP 下載（wget / curl / 瀏覽器）
-          - 檔案過大，直接讀取會超出 context 限制
-
-        請勿用於讀取文字檔 —— 直接用 read_file 即可。
-
-        file_path 必須為絕對路徑且在 allowed_paths 範圍內。
-        請從 cmd_list_allowed_paths 或 cmd_workspace_context 取得有效的根路徑。
-        回傳的 uri 可直接以 wget / curl / requests.get 下載，不需附帶 Authorization header。
-
-        成功回傳（dict）：
-          success            (bool) — True
-          uri                (str)  — HTTP 下載網址，有效期間為 expires_in_seconds 秒
-          expires_in_seconds (int)  — 600（10 分鐘）
-          file_name          (str)  — 檔案名稱
-
-        失敗回傳（dict）：
-          success (bool) — False
-          error   (str)  — 失敗原因
+    def get_download_uri(
+        file_path: Annotated[str, Field(description="要下載的檔案絕對路徑，必須在 allowed_paths 範圍內")],
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """產生指定檔案的臨時 HTTP 下載連結（10 分鐘有效）。
+        適用於二進位檔案（圖片、PDF、壓縮檔）或需要用 wget/curl 下載的場景。
+        文字檔請直接用 read_file，不需要此工具。
         """
         _purge_expired_tokens()
 
@@ -590,26 +532,14 @@ def _build_read_server(allowed_paths: list[Path]) -> FastMCP:
     read_mcp = FastMCP(name="增強文字讀取器")
 
     @read_mcp.tool()
-    def read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
-        """讀取文字檔，回傳帶行號的內容（對齊 CC Read 工具）。
-
-        此工具取代 fs_read_text_file，提供行號輸出與任意行範圍支援。
+    def read_file(
+        path: Annotated[str, Field(description="要讀取的檔案絕對路徑")],
+        offset: Annotated[int, Field(description="起始行（0-indexed，0 = 從第一行）")] = 0,
+        limit: Annotated[int, Field(description="讀取行數（0 = 讀到底；大型檔案建議設定此值）")] = 0,
+    ) -> dict[str, Any]:
+        """讀取文字檔，回傳帶行號內容（格式：\"{行號}\\t{內容}\"）。
+        大型檔案請搭配 offset/limit 分段讀取。
         二進位檔案（圖片、音訊）請改用 fs_read_media_file。
-
-        參數：
-          path   — 絕對路徑（從 cmd_workspace_context 取得根路徑）
-          offset — 起始行（0-indexed，預設 0 = 從第一行）
-          limit  — 讀取行數（預設 0 = 全部；大型檔案建議設定此值）
-
-        成功回傳（dict）：
-          file_path   (str)  — 讀取的絕對路徑
-          content     (str)  — 帶行號內容，格式："{行號}\\t{該行內容}"
-          num_lines   (int)  — 本次回傳行數
-          start_line  (int)  — 起始行號（1-indexed）
-          total_lines (int)  — 檔案總行數（供判斷是否已讀完整個檔案）
-
-        失敗回傳（dict）：
-          error (str) — 失敗原因（以 [ERROR] 開頭）
         """
         file_path = Path(path).resolve()
         if not any(file_path == base or base in file_path.parents for base in allowed_paths):
@@ -723,66 +653,22 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
 
     @grep_mcp.tool()
     def grep_files(
-        pattern: str,
-        path: str,
-        output_mode: str = "content",
-        glob: str = "",
-        file_type: str = "",
-        context_lines: int = 0,
-        before_context: int = 0,
-        after_context: int = 0,
-        ignore_case: bool = False,
-        head_limit: int = 250,
-        offset: int = 0,
-        fixed_strings: bool = False,
-        multiline: bool = False,
+        pattern: Annotated[str, Field(description="正則表達式（fixed_strings=True 時為純字串），例如 'TODO'、'def \\w+'")],
+        path: Annotated[str, Field(description="搜尋根目錄的絕對路徑，必須在 allowed_paths 範圍內")],
+        output_mode: Annotated[str, Field(description='"content"=回傳匹配行與上下文；"files_with_matches"=只回傳檔案清單；"count"=各檔案匹配數')] = "content",
+        glob: Annotated[str, Field(description="檔案過濾 glob，例如 '*.py'、'*.{ts,tsx}'；空字串表示不限")] = "",
+        file_type: Annotated[str, Field(description="ripgrep 內建檔案類型，例如 'py'、'ts'、'rust'；比 glob 簡潔，空字串表示不限")] = "",
+        context_lines: Annotated[int, Field(description="匹配前後對稱顯示行數（等同 -C），預設 0")] = 0,
+        before_context: Annotated[int, Field(description="匹配前顯示行數（等同 -B），預設 0")] = 0,
+        after_context: Annotated[int, Field(description="匹配後顯示行數（等同 -A），預設 0")] = 0,
+        ignore_case: Annotated[bool, Field(description="True 表示忽略大小寫")] = False,
+        head_limit: Annotated[int, Field(description="輸出截斷行數/筆數（預設 250；0 = 不限）")] = 250,
+        offset: Annotated[int, Field(description="跳過前 N 筆結果，用於分頁（預設 0）")] = 0,
+        fixed_strings: Annotated[bool, Field(description="True 表示純字串比對，停用 regex")] = False,
+        multiline: Annotated[bool, Field(description="True 表示啟用多行模式（. 可匹配換行）")] = False,
     ) -> dict[str, Any]:
-        """以 ripgrep 搜尋檔案內容（對齊 CC Grep 工具）。自動排除 VCS 目錄（.git 等）。
-
-        參數：
-          pattern        — 搜尋的正則表達式（或 fixed_strings=True 時為純字串）
-                           範例：'TODO'、'def \\w+'、'import os'
-          path           — 要搜尋的絕對路徑（必須在 allowed_paths 範圍內）
-                           請從 cmd_workspace_context 取得有效路徑
-          output_mode    — 輸出模式（預設 "content"）：
-                           "content"           — 回傳匹配行與上下文（純文字）
-                           "files_with_matches"— 只回傳有匹配的檔案清單
-                           "count"             — 回傳各檔案的匹配數量
-          glob           — 檔案過濾 glob，例如 '*.py'、'*.{ts,tsx}'（空字串 = 不限）
-          file_type      — ripgrep 檔案類型，例如 'py'、'ts'、'rust'（空字串 = 不限）
-                           比 glob 更簡潔；可用 rg --type-list 查詢支援的類型
-          context_lines  — 匹配前後對稱顯示行數（等同 -C，預設 0）
-          before_context — 匹配前顯示行數（等同 -B，預設 0）
-          after_context  — 匹配後顯示行數（等同 -A，預設 0）
-          ignore_case    — 忽略大小寫（預設 False）
-          head_limit     — 輸出截斷行數/筆數（預設 250；0 = 不限）
-          offset         — 跳過前 N 行結果（分頁用，預設 0）
-          fixed_strings  — True 表示純字串比對（停用 regex，等同 rg -F）
-          multiline      — 啟用多行模式（. 可匹配換行，預設 False）
-
-        回傳（dict）— 依 output_mode：
-
-        output_mode="content"：
-          mode          (str)       — "content"
-          num_files     (int)       — 匹配到的檔案數
-          filenames     (list[str]) — 匹配到的檔案路徑清單
-          content       (str)       — 匹配行與上下文（純文字）
-          num_lines     (int)       — 本次回傳行數
-          applied_limit (int)       — 實際套用的 head_limit（0 表示未截斷）
-          applied_offset (int)      — 實際套用的 offset
-
-        output_mode="files_with_matches"：
-          mode      (str)       — "files_with_matches"
-          num_files (int)       — 匹配到的檔案數
-          filenames (list[str]) — 匹配到的檔案路徑清單
-
-        output_mode="count"：
-          mode        (str)       — "count"
-          num_matches (int)       — 全部匹配總數
-          per_file    (list[dict])— 各檔案的 {file, count}
-
-        錯誤時回傳：{"error": "[ERROR] <原因>"}
-        無匹配時回傳：{"mode": ..., "num_files": 0, ...（其他欄位為空）}
+        """以 ripgrep 搜尋檔案內容。自動排除 .git 等版本控制目錄。
+        搜尋符合 glob pattern 的檔名請用 glob_files。
         """
         search_path = Path(path).resolve()
         if not any(search_path == base or base in search_path.parents for base in allowed_paths):
@@ -895,26 +781,12 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
 
     @grep_mcp.tool()
     def glob_files(
-        pattern: str,
-        path: str = "",
-        limit: int = 100,
+        pattern: Annotated[str, Field(description="glob pattern，例如 '**/*.py'、'src/**/*.ts'、'*.json'")],
+        path: Annotated[str, Field(description="搜尋根目錄絕對路徑；留空則使用第一個 allowed_path")] = "",
+        limit: Annotated[int, Field(description="回傳結果上限（預設 100）")] = 100,
     ) -> dict[str, Any]:
-        """以 ripgrep 搜尋符合 glob pattern 的檔名，結果依修改時間排序（最新在前）。
-
-        取代 fs_search_files。自動尊重 .gitignore（由 ripgrep 原生處理）。
-
-        參數：
-          pattern — glob pattern，例如 '**/*.py'、'src/**/*.ts'、'*.json'
-          path    — 搜尋根目錄（空字串 = 第一個 allowed_path）
-                    請從 cmd_workspace_context 取得有效路徑
-          limit   — 結果上限（預設 100）
-
-        回傳（dict）：
-          num_files  (int)       — 實際匹配到的檔案總數（截斷前）
-          filenames  (list[str]) — 絕對路徑清單（依修改時間降序，最新在前）
-          truncated  (bool)      — 結果是否被 limit 截斷
-
-        錯誤時回傳：{"error": "[ERROR] <原因>"}
+        """搜尋符合 glob pattern 的檔名，結果依修改時間排序（最新在前）。自動尊重 .gitignore。
+        搜尋檔案內容請用 grep_files。
         """
         if not path:
             search_path = allowed_paths[0] if allowed_paths else Path.cwd()
@@ -965,19 +837,11 @@ def _build_markitdown_server(allowed_paths: list[Path]) -> FastMCP:
 
     @md_mcp.tool()
     def convert_to_markdown(
-        input_path: str,
-        output_path: str = "",
+        input_path: Annotated[str, Field(description="來源檔案絕對路徑，必須在 allowed_paths 範圍內")],
+        output_path: Annotated[str, Field(description="輸出 .md 檔案路徑；留空則自動以同目錄同檔名加 .md 副檔名")] = "",
     ) -> dict[str, Any]:
-        """將檔案（PDF、DOCX、PPTX、XLSX、HTML、圖片等）轉換為 Markdown，直接寫入磁碟。
-
-        參數：
-            input_path  - 來源檔案路徑（必須在 allowed_paths 範圍內）
-            output_path - 輸出 .md 檔案路徑（留空時自動以同目錄同檔名加 .md 副檔名）
-
-        回傳：
-            output_path - 實際寫入的 .md 檔案完整路徑
-            title       - 原文件標題（若有）
-            char_count  - 輸出 Markdown 字元數
+        """將檔案（PDF、DOCX、PPTX、XLSX、HTML、圖片等）轉換為 Markdown 並寫入磁碟。
+        轉換結果寫入 output_path（預設與來源同目錄，副檔名改為 .md）。
         """
         src = Path(input_path).resolve()
 
