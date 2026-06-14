@@ -13,10 +13,9 @@
 | `cmd_workspace_context` | 一次取得路徑 + 命令 + 頂層目錄結構（建議連線後第一步呼叫） |
 | `cmd_run_command` | 執行白名單命令，支援 `;` 串接多個命令 |
 | `cmd_list_allowed_commands` | 列出白名單命令及說明 |
-| `cmd_list_allowed_paths` | 列出允許存取的路徑 |
 | `cmd_reload_whitelist` | 重新從磁碟載入白名單（需本機使用者確認） |
 | `file_get_download_uri` | 產生 10 分鐘有效的匿名 HTTP 下載連結 |
-| `md_convert_to_markdown` | 將 PDF、DOCX、PPTX、XLSX、HTML、圖片等轉換為 Markdown |
+| `md_convert_to_markdown` | 將 PDF、DOCX、PPTX、XLSX、HTML、圖片等轉換為 Markdown 並寫入硬碟 |
 
 **額外特性：**
 - **Gitignore 過濾**：`fs_directory_tree` 自動讀取 `.gitignore` 並排除對應檔案
