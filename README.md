@@ -104,23 +104,6 @@ python proxy_server.py --config /path/to/config.json
 | `GET /health` | 健康檢查，回傳 allowed_paths 與白名單數量 |
 | `GET /download/{token}` | 臨時檔案下載（無需 Bearer Token） |
 
-## 連接至 Claude Code
-
-在 Claude Code 的 MCP 設定中新增此 proxy：
-
-```json
-{
-  "mcpServers": {
-    "workspace": {
-      "type": "http",
-      "url": "http://your-server:8100/mcp",
-      "headers": {
-        "Authorization": "Bearer your-secret-token"
-      }
-    }
-  }
-}
-```
 
 ## 建議使用流程
 
