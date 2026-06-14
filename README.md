@@ -1,23 +1,29 @@
 # external-workspace-mcp
 
-一個整合式 MCP（Model Context Protocol）Proxy 伺服器，將檔案系統存取、命令白名單執行、檔案下載與內容搜尋功能統一透過單一 HTTP 端點提供給遠端 AI agent 使用。
+一個整合式 MCP（Model Context Protocol）Proxy 伺服器，將檔案系統存取、命令白名單執行、檔案下載、內容搜尋與文件轉換功能統一透過單一 HTTP 端點提供給遠端 AI agent 使用。
 
 ## 功能概覽
 
-| 命名空間 | 工具 | 說明 |
-|----------|------|------|
-| `fs_*` | 來自 `@modelcontextprotocol/server-filesystem` | 讀寫檔案、列目錄、搜尋檔案等 |
-| `cmd_run_command` | 執行白名單命令 | 只允許執行 `.cmd_whitelist.json` 中定義的命令 |
-| `cmd_list_allowed_commands` | 列出允許的命令 | 回傳白名單清單與描述 |
-| `cmd_list_allowed_paths` | 列出允許的路徑 | 回傳 proxy 可存取的目錄 |
-| `file_get_download_uri` | 產生臨時下載 URI | 產生 10 分鐘有效的匿名下載連結 |
-| `grep_files` | 以 ripgrep 搜尋內容 | 跨檔案正則搜尋，支援 glob 過濾與上下文行數 |
+| 工具 | 說明 |
+|------|------|
+| `read_file` | 讀取文字檔，帶行號輸出，支援 offset/limit 分段讀取 |
+| `grep_files` | 以 ripgrep 搜尋檔案內容，支援三種輸出模式、前後文、類型過濾 |
+| `glob_files` | 以 glob pattern 搜尋檔名，依修改時間排序，尊重 .gitignore |
+| `fs_*` | 來自 `@modelcontextprotocol/server-filesystem`（寫檔、目錄操作、媒體讀取等） |
+| `cmd_workspace_context` | 一次取得路徑 + 命令 + 頂層目錄結構（建議連線後第一步呼叫） |
+| `cmd_run_command` | 執行白名單命令，支援 `;` 串接多個命令 |
+| `cmd_list_allowed_commands` | 列出白名單命令及說明 |
+| `cmd_list_allowed_paths` | 列出允許存取的路徑 |
+| `cmd_reload_whitelist` | 重新從磁碟載入白名單（需本機使用者確認） |
+| `file_get_download_uri` | 產生 10 分鐘有效的匿名 HTTP 下載連結 |
+| `md_convert_to_markdown` | 將 PDF、DOCX、PPTX、XLSX、HTML、圖片等轉換為 Markdown |
 
 **額外特性：**
-- **Gitignore 過濾**：`fs_search_files` / `fs_directory_tree` 會自動讀取 `.gitignore` 並排除對應檔案
+- **Gitignore 過濾**：`fs_directory_tree` 自動讀取 `.gitignore` 並排除對應檔案
+- **工具隱藏**：已被自訂工具取代的 `fs_read_file`、`fs_read_text_file`、`fs_search_files` 自動隱藏
 - **Bearer Token 驗證**：可設定 token 保護所有 MCP 端點
 - **ripgrep 自動安裝**：若系統未安裝 `rg`，會自動從 GitHub 下載對應平台的 binary
-- **反向代理友好**：透過 `X-Forwarded-Proto` / `X-Forwarded-Host` 自動產生正確的對外下載 URI
+- **串接命令**：`cmd_run_command` 支援以 `;` 串接多個白名單命令依序執行
 
 ## 需求
 
@@ -72,7 +78,8 @@ pip install -r requirements.txt
 
 每個項目可以是純字串，或是包含 `command`（必填）與 `description`（選填）的物件。
 
-**安全注意**：只允許完全符合白名單的命令字串，不支援模糊比對或萬用字元。
+**安全注意**：只允許完全符合白名單的命令字串，不支援模糊比對或萬用字元。  
+**串接執行**：可用 `"git status; git log --oneline -20"` 一次呼叫執行多個白名單命令，任一命令失敗時預設停止（可透過 `fail_fast=false` 調整）。
 
 ## 啟動
 
@@ -116,15 +123,28 @@ python proxy_server.py --config /path/to/config.json
 }
 ```
 
+## 建議使用流程
+
+1. 呼叫 `cmd_workspace_context` 取得工作區完整概覽（路徑、可用命令、頂層目錄結構）
+2. 用 `read_file` 讀取文字檔、`grep_files` 搜尋內容、`glob_files` 搜尋檔名
+3. 用 `fs_write_file` / `fs_edit_file` 寫入或修改檔案
+4. 用 `cmd_run_command` 執行命令（必須完全符合白名單）
+5. 需要下載二進位檔案時，用 `file_get_download_uri` 產生臨時連結
+6. 需要轉換 PDF/Office 文件時，用 `md_convert_to_markdown`
+
 ## 專案結構
 
 ```
 external-workspace-mcp/
-├── proxy_server.py        # 主程式
+├── proxy_server.py        # 主程式：組裝 proxy、路由、middleware、啟動 uvicorn
+├── config.py              # 設定載入、白名單解析、shell 命令建構
+├── middleware.py           # GitignoreExcludeMiddleware、ToolFilterMiddleware
+├── servers.py             # 各子伺服器工具定義（cmd/file/read/grep/markitdown）
+├── ripgrep.py             # ripgrep binary 自動下載與管理
 ├── .mcp-proxy.json        # 伺服器設定
 ├── .cmd_whitelist.json    # 命令白名單（範例）
 ├── requirements.txt       # Python 依賴
-└── bin/                   # ripgrep binary 自動下載位置（.gitignore 建議排除）
+└── bin/                   # ripgrep binary 自動下載位置（建議加入 .gitignore）
 ```
 
 ## 授權
