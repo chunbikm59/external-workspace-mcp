@@ -17,12 +17,31 @@ def _gitignore_to_minimatch(pattern: str) -> list[str]:
     p = pattern.strip()
     if not p or p.startswith("#"):
         return []
-    if p.endswith("/"):
-        base = p.rstrip("/")
-        return [base, f"{base}/**"]
-    if "/" not in p:
-        return [p, f"**/{p}"]
-    return [p]
+
+    is_dir = p.endswith("/")
+    p = p.rstrip("/")
+
+    # 負向 pattern（!）暫不支援，略過
+    if p.startswith("!"):
+        return []
+
+    # 有開頭 / 表示只匹配根目錄
+    if p.startswith("/"):
+        base = p.lstrip("/")
+        if is_dir:
+            return [base, f"{base}/**"]
+        return [base]
+
+    # 含 / 但不是開頭：視為相對路徑，直接用
+    if "/" in p:
+        if is_dir:
+            return [p, f"{p}/**"]
+        return [p]
+
+    # 無 /：任何層級都匹配，加 **/ 前綴
+    if is_dir:
+        return [f"**/{p}", f"**/{p}/**"]
+    return [f"**/{p}"]
 
 
 def _load_gitignore_patterns(allowed_paths: list[Path]) -> list[str]:
