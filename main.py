@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +42,14 @@ from servers import (
     _download_tokens,
     _purge_expired_tokens,
     _session_base_urls,
+    _build_capture_ppt_server,
     _build_cmd_server,
     _build_file_server,
     _build_grep_server,
     _build_markitdown_server,
     _build_read_server,
+    get_temp_dir_for_markdown,
+    get_temp_dir_for_ppt,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,8 +63,14 @@ def build_app(
     port: int = DEFAULT_PORT,
     whitelist_filename: str = DEFAULT_WHITELIST_FILENAME,
     rg_path: str = "rg",
+    readonly_mode: bool = False,
+    disabled_tools: list[str] | None = None,
+    endpoint_id: str | None = None,
 ) -> Any:
     """組裝 FastMCP 伺服器並回傳 ASGI app。"""
+
+    endpoint_id = endpoint_id or os.environ.get("MCP_ENDPOINT_ID") or uuid.uuid4().hex
+    temp_dirs = [get_temp_dir_for_markdown(endpoint_id), get_temp_dir_for_ppt(endpoint_id)]
 
     _instructions = """\
 此伺服器提供工作區存取，整合了以下工具：
@@ -80,8 +91,15 @@ def build_app(
 - cmd_run_command       ：執行白名單命令
 - cmd_list_allowed_commands
 
+文件轉換與截圖（md_*）：
+- md_convert_to_markdown ：將 PDF/DOCX/PPTX/XLSX/HTML/圖片等轉為 Markdown
+- md_capture_ppt_slides  ：將 PPT/PPTX/ODP 投影片轉為 PNG/JPEG 圖片（需安裝 LibreOffice）
+
 其他：
 - file_get_download_uri ：產生 10 分鐘有效的匿名 HTTP 下載連結
+
+唯讀模式（readonlyMode）：啟用時會停用所有寫入類工具（fs_write_file/fs_edit_file/fs_move_file/cmd_run_command 等），
+md_* 轉換／截圖工具的輸出則改寫入暫存目錄，可用 file_get_download_uri 取得連結後下載。
 
 建議的初始步驟：
 1. 呼叫 cmd_workspace_context 取得完整環境概覽
@@ -94,7 +112,10 @@ def build_app(
     proxy = FastMCP(
         name="MCP Workspace Server",
         instructions=_instructions,
-        middleware=[ToolFilterMiddleware(), GitignoreExcludeMiddleware(allowed_paths)],
+        middleware=[
+            ToolFilterMiddleware(readonly_mode, disabled_tools),
+            GitignoreExcludeMiddleware(allowed_paths),
+        ],
     )
 
     fs_args = [str(p) for p in allowed_paths]
@@ -109,17 +130,20 @@ def build_app(
     cmd_server = _build_cmd_server(allowed_paths, whitelist, whitelist_filename)
     proxy.mount(cmd_server, namespace="cmd")
 
-    file_server = _build_file_server(allowed_paths, host, port)
+    file_server = _build_file_server(allowed_paths, host, port, temp_dirs)
     proxy.mount(file_server, namespace="file")
 
-    read_server = _build_read_server(allowed_paths)
+    read_server = _build_read_server(allowed_paths, temp_dirs)
     proxy.mount(read_server)
 
-    grep_server = _build_grep_server(allowed_paths, rg_path)
+    grep_server = _build_grep_server(allowed_paths, rg_path, temp_dirs)
     proxy.mount(grep_server)
 
-    markitdown_server = _build_markitdown_server(allowed_paths)
+    markitdown_server = _build_markitdown_server(allowed_paths, readonly_mode, endpoint_id)
     proxy.mount(markitdown_server, namespace="md")
+
+    capture_ppt_server = _build_capture_ppt_server(allowed_paths, readonly_mode, endpoint_id)
+    proxy.mount(capture_ppt_server, namespace="md")
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -195,6 +219,8 @@ def main() -> None:
     port = args.port or config.get("port", DEFAULT_PORT)
     bearer_token = args.bearer_token or config.get("bearer-token") or None
     whitelist_filename = config.get("whitelist-filename", DEFAULT_WHITELIST_FILENAME)
+    readonly_mode = bool(config.get("readonlyMode", config.get("readonly_mode", False)))
+    disabled_tools = config.get("disabledTools", config.get("disabled_tools", [])) or []
 
     if args.allowed_paths:
         allowed_paths = [Path(p).resolve() for p in args.allowed_paths]
@@ -211,11 +237,24 @@ def main() -> None:
         print(f"[INFO] Bearer Token 驗證：已啟用")
     else:
         print(f"[WARN] Bearer Token 驗證：未設定（所有請求均可存取）")
+    print(f"[INFO] 唯讀模式：{'開啟' if readonly_mode else '關閉'}")
+    if disabled_tools:
+        print(f"[INFO] 停用工具：{disabled_tools}")
 
     rg_path = _ensure_ripgrep()
     print(f"[INFO] 使用 ripgrep：{rg_path}")
 
-    app = build_app(allowed_paths, whitelist, bearer_token, host, port, whitelist_filename, rg_path)
+    app = build_app(
+        allowed_paths,
+        whitelist,
+        bearer_token,
+        host,
+        port,
+        whitelist_filename,
+        rg_path,
+        readonly_mode=readonly_mode,
+        disabled_tools=disabled_tools,
+    )
 
     uvicorn.run(app, host=host, port=port)
 

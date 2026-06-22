@@ -49,6 +49,23 @@ def _resolve_allowed_paths(config: dict[str, Any]) -> list[Path]:
     return [Path(p).resolve() for p in raw]
 
 
+def _is_path_allowed(
+    target: Path,
+    allowed_paths: list[Path],
+    temp_dirs: list[Path] | None = None,
+) -> bool:
+    """檢查 target 是否落在 allowed_paths 內；若有 temp_dirs 則再比對之。
+
+    對齊 GUI 版 config.ts 的 isPathAllowed。
+    """
+    resolved = target.resolve()
+    if any(resolved == base or base in resolved.parents for base in allowed_paths):
+        return True
+    if temp_dirs:
+        return any(resolved == base or base in resolved.parents for base in temp_dirs)
+    return False
+
+
 def _load_whitelist(allowed_paths: list[Path], filename: str) -> list[str]:
     commands: list[str] = []
     for base in allowed_paths:

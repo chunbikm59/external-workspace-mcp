@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -18,10 +19,12 @@ from markitdown import MarkItDown
 from config import (
     _ask_user_confirm,
     _build_shell_args,
+    _is_path_allowed,
     _load_whitelist,
     _parse_composite_command,
 )
 from ripgrep import _VCS_EXCLUDE_GLOBS
+from soffice import SOFFICE_NOT_FOUND_MESSAGE, find_soffice
 
 # ── 臨時下載 token 儲存 ────────────────────────────────────────────────────────
 
@@ -29,6 +32,16 @@ _download_tokens: dict[str, tuple[Path, float]] = {}
 _session_base_urls: dict[str, str] = {}  # session_id -> "https://host"
 
 DOWNLOAD_TOKEN_TTL = 600  # 秒
+
+
+# ── 暫存目錄（唯讀模式下的寫入目標）────────────────────────────────────────────
+
+def get_temp_dir_for_markdown(endpoint_id: str) -> Path:
+    return Path(tempfile.gettempdir()) / f"mcp-md-{endpoint_id}"
+
+
+def get_temp_dir_for_ppt(endpoint_id: str) -> Path:
+    return Path(tempfile.gettempdir()) / f"mcp-ppt-{endpoint_id}"
 
 
 def _purge_expired_tokens() -> None:
@@ -270,6 +283,7 @@ def _build_file_server(
     allowed_paths: list[Path],
     fallback_host: str,
     port: int,
+    temp_dirs: list[Path] | None = None,
 ) -> FastMCP:
     file_mcp = FastMCP(name="檔案下載 URI 產生器")
 
@@ -289,7 +303,7 @@ def _build_file_server(
         if not path.is_file():
             return {"success": False, "error": f"檔案不存在：{file_path}"}
 
-        if not any(path == base or base in path.parents for base in allowed_paths):
+        if not _is_path_allowed(path, allowed_paths, temp_dirs):
             return {"success": False, "error": "檔案不在允許的目錄範圍內"}
 
         token = str(uuid.uuid4())
@@ -314,7 +328,7 @@ def _build_file_server(
 
 # ── 增強文字讀取工具 ──────────────────────────────────────────────────────────
 
-def _build_read_server(allowed_paths: list[Path]) -> FastMCP:
+def _build_read_server(allowed_paths: list[Path], temp_dirs: list[Path] | None = None) -> FastMCP:
     read_mcp = FastMCP(name="增強文字讀取器")
 
     @read_mcp.tool()
@@ -328,7 +342,7 @@ def _build_read_server(allowed_paths: list[Path]) -> FastMCP:
         二進位檔案（圖片、音訊）請改用 fs_read_media_file。
         """
         file_path = Path(path).resolve()
-        if not any(file_path == base or base in file_path.parents for base in allowed_paths):
+        if not _is_path_allowed(file_path, allowed_paths, temp_dirs):
             return {"error": "[ERROR] 路徑不在允許範圍內。請用 fs_list_allowed_directories 取得有效路徑。"}
         if not file_path.is_file():
             return {"error": f"[ERROR] 檔案不存在：{path}"}
@@ -355,7 +369,11 @@ def _build_read_server(allowed_paths: list[Path]) -> FastMCP:
 
 # ── ripgrep 搜尋工具 ──────────────────────────────────────────────────────────
 
-def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
+def _build_grep_server(
+    allowed_paths: list[Path],
+    rg_path: str,
+    temp_dirs: list[Path] | None = None,
+) -> FastMCP:
     grep_mcp = FastMCP(name="ripgrep 搜尋工具")
 
     @grep_mcp.tool()
@@ -378,7 +396,7 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
         搜尋符合 glob pattern 的檔名請用 glob_files。
         """
         search_path = Path(path).resolve()
-        if not any(search_path == base or base in search_path.parents for base in allowed_paths):
+        if not _is_path_allowed(search_path, allowed_paths, temp_dirs):
             return {"error": "[ERROR] 路徑不在允許範圍內。請用 fs_list_allowed_directories 取得有效路徑。"}
         if not search_path.exists():
             return {"error": f"[ERROR] 路徑不存在：{path}"}
@@ -490,7 +508,7 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
         else:
             search_path = Path(path).resolve()
 
-        if not any(search_path == base or base in search_path.parents for base in allowed_paths):
+        if not _is_path_allowed(search_path, allowed_paths, temp_dirs):
             return {"error": "[ERROR] 路徑不在允許範圍內。請用 fs_list_allowed_directories 取得有效路徑。"}
         if not search_path.exists():
             return {"error": f"[ERROR] 路徑不存在：{path or str(search_path)}"}
@@ -527,29 +545,44 @@ def _build_grep_server(allowed_paths: list[Path], rg_path: str) -> FastMCP:
 
 # ── Markitdown 轉換工具 ───────────────────────────────────────────────────────
 
-def _build_markitdown_server(allowed_paths: list[Path]) -> FastMCP:
+def _build_markitdown_server(
+    allowed_paths: list[Path],
+    readonly_mode: bool = False,
+    endpoint_id: str = "default",
+) -> FastMCP:
     md_mcp = FastMCP(name="Markitdown 轉換器")
 
-    @md_mcp.tool()
+    _readonly_note = (
+        "⚠ 唯讀模式：輸出強制寫入暫存目錄，不會修改原始資料夾。"
+        if readonly_mode
+        else "輸出路徑預設為同目錄同檔名加 .md 副檔名。"
+    )
+    _convert_description = (
+        "將檔案（PDF、DOCX、PPTX、XLSX、HTML、圖片等）轉換為 Markdown 並寫入磁碟。"
+        f"{_readonly_note}"
+    )
+
+    @md_mcp.tool(description=_convert_description)
     def convert_to_markdown(
         input_path: Annotated[str, Field(description="來源檔案絕對路徑，必須在 allowed_paths 範圍內")],
-        output_path: Annotated[str, Field(description="輸出 .md 檔案路徑；留空則自動以同目錄同檔名加 .md 副檔名")] = "",
+        output_path: Annotated[str, Field(description="輸出 .md 檔案路徑；留空則自動決定（唯讀模式下強制寫入暫存目錄）")] = "",
     ) -> dict[str, Any]:
-        """將檔案（PDF、DOCX、PPTX、XLSX、HTML、圖片等）轉換為 Markdown 並寫入磁碟。
-        轉換結果寫入 output_path（預設與來源同目錄，副檔名改為 .md）。
-        """
         src = Path(input_path).resolve()
 
         if not src.is_file():
             return {"success": False, "error": f"檔案不存在：{input_path}"}
 
-        if not any(src == base or base in src.parents for base in allowed_paths):
+        if not _is_path_allowed(src, allowed_paths):
             return {"success": False, "error": "input_path 不在允許的目錄範圍內"}
 
         if output_path:
             dst = Path(output_path).resolve()
-            if not any(dst.parent == base or base in dst.parent.parents for base in allowed_paths):
+            if not readonly_mode and not _is_path_allowed(dst.parent, allowed_paths):
                 return {"success": False, "error": "output_path 不在允許的目錄範圍內"}
+        elif readonly_mode:
+            temp_dir = get_temp_dir_for_markdown(endpoint_id)
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            dst = temp_dir / f"{src.stem}_{uuid.uuid4().hex[:8]}.md"
         else:
             dst = src.with_suffix(".md")
 
@@ -559,6 +592,7 @@ def _build_markitdown_server(allowed_paths: list[Path]) -> FastMCP:
             return {"success": False, "error": f"轉換失敗：{exc}"}
 
         try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(result.markdown, encoding="utf-8")
         except Exception as exc:
             return {"success": False, "error": f"寫入檔案失敗：{exc}"}
@@ -568,6 +602,211 @@ def _build_markitdown_server(allowed_paths: list[Path]) -> FastMCP:
             "output_path": str(dst),
             "title": result.title or "",
             "char_count": len(result.markdown),
+            "readonly_mode": readonly_mode,
         }
 
     return md_mcp
+
+
+# ── PPT 截圖工具 ──────────────────────────────────────────────────────────────
+
+_PPT_SUPPORTED_EXTENSIONS = [".ppt", ".pptx", ".odp"]
+_PPT_RENDER_SCALE = 3.0
+_PPT_INDIVIDUAL_THRESHOLD = 8
+_PPT_GRID_COLS = 2
+_PPT_MAX_PER_GRID = 6
+_PPT_GRID_CELL_WIDTH = 1600
+_PPT_GRID_PADDING = 12
+_PPT_GRID_LABEL_HEIGHT = 24
+
+
+def _ppt_convert_to_pdf(soffice_path: str, src: Path, out_dir: Path) -> Path:
+    args = [
+        soffice_path,
+        "--headless",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(out_dir),
+        str(src),
+    ]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("soffice 轉換超時（120 秒）") from exc
+
+    pdf_path = out_dir / f"{src.stem}.pdf"
+    # 首次執行（建立 profile）時可能回傳非 0 但轉換實際成功，故以輸出檔案是否存在為準
+    if not pdf_path.is_file():
+        raise RuntimeError(f"soffice 轉換失敗（exit {proc.returncode}）：{proc.stderr or proc.stdout}")
+    return pdf_path
+
+
+def _ppt_render_pdf_pages(pdf_path: Path):
+    """以 PyMuPDF 將 PDF 每頁渲染為 PIL.Image。"""
+    import fitz  # PyMuPDF
+    from PIL import Image
+
+    doc = fitz.open(str(pdf_path))
+    images = []
+    matrix = fitz.Matrix(_PPT_RENDER_SCALE, _PPT_RENDER_SCALE)
+    try:
+        for page in doc:
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            images.append(img)
+    finally:
+        doc.close()
+    return images
+
+
+def _ppt_build_grid_images(images, cols: int):
+    """將多張投影片合併為格狀縮圖（對齊 GUI 的 buildGridImages）。回傳 list[PIL.Image]（RGB）。"""
+    from PIL import Image, ImageDraw, ImageFont
+
+    first = images[0]
+    aspect = first.height / first.width
+    cell_h = round(_PPT_GRID_CELL_WIDTH * aspect)
+    max_per_grid = cols * -(-_PPT_MAX_PER_GRID // cols)  # ceil(MAX_PER_GRID/cols)*cols
+
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    grids = []
+    for chunk_idx in range(0, len(images), max_per_grid):
+        chunk = images[chunk_idx:chunk_idx + max_per_grid]
+        rows = -(-len(chunk) // cols)  # ceil
+        grid_w = cols * _PPT_GRID_CELL_WIDTH + (cols + 1) * _PPT_GRID_PADDING
+        cell_total_h = cell_h + _PPT_GRID_LABEL_HEIGHT
+        grid_h = rows * cell_total_h + (rows + 1) * _PPT_GRID_PADDING
+
+        grid = Image.new("RGB", (grid_w, grid_h), "white")
+        draw = ImageDraw.Draw(grid)
+
+        for i, slide in enumerate(chunk):
+            row = i // cols
+            col = i % cols
+            x = col * _PPT_GRID_CELL_WIDTH + (col + 1) * _PPT_GRID_PADDING
+            y_base = row * cell_total_h + (row + 1) * _PPT_GRID_PADDING
+            slide_num = chunk_idx + i + 1
+
+            label = f"#{slide_num}"
+            draw.text(
+                (x + _PPT_GRID_CELL_WIDTH // 2, y_base + 4),
+                label,
+                fill="black",
+                font=font,
+                anchor="ma" if font else None,
+            )
+
+            y_thumb = y_base + _PPT_GRID_LABEL_HEIGHT
+            thumb = slide.resize((_PPT_GRID_CELL_WIDTH, cell_h))
+            grid.paste(thumb, (x, y_thumb))
+            draw.rectangle(
+                [x, y_thumb, x + _PPT_GRID_CELL_WIDTH - 1, y_thumb + cell_h - 1],
+                outline="gray",
+                width=1,
+            )
+
+        grids.append(grid)
+    return grids
+
+
+def _build_capture_ppt_server(
+    allowed_paths: list[Path],
+    readonly_mode: bool = False,
+    endpoint_id: str = "default",
+) -> FastMCP:
+    ppt_mcp = FastMCP(name="PPT 截圖工具")
+
+    _readonly_note = (
+        "⚠ 唯讀模式：輸出強制寫入暫存目錄。"
+        if readonly_mode
+        else "輸出路徑預設為來源檔案同目錄下的 <檔名>_slides/ 子目錄。"
+    )
+    _capture_description = (
+        "將 PPT/PPTX/ODP 投影片轉換為 PNG/JPEG 圖片並寫入磁碟（需系統安裝 LibreOffice）。"
+        "頁數較多時自動將多張投影片合併為格狀縮圖（grid）以減少檔案數量；可用 mode 強制指定。"
+        "回傳的圖片路徑可搭配 file_get_download_uri 工具產生下載連結後讀取。"
+        f"{_readonly_note}"
+    )
+
+    @ppt_mcp.tool(description=_capture_description)
+    def capture_ppt_slides(
+        input_path: Annotated[str, Field(description="來源 PPT/PPTX/ODP 檔案絕對路徑，必須在 allowed_paths 範圍內")],
+        output_dir: Annotated[str, Field(description="輸出目錄；留空則自動決定（唯讀模式下強制寫入暫存目錄）")] = "",
+        mode: Annotated[str, Field(description=f"輸出模式：auto（頁數 <= {_PPT_INDIVIDUAL_THRESHOLD} 逐頁輸出，否則合併為 grid）、individual（強制逐頁 PNG）、grid（強制格狀縮圖）")] = "auto",
+        grid_cols: Annotated[int, Field(description=f"grid 模式每列欄數，0 表示使用預設值（{_PPT_GRID_COLS} 欄）", ge=0, le=8)] = 0,
+    ) -> dict[str, Any]:
+        soffice_path = find_soffice()
+        if not soffice_path:
+            return {"success": False, "error": SOFFICE_NOT_FOUND_MESSAGE}
+
+        src = Path(input_path).resolve()
+        if not _is_path_allowed(src, allowed_paths):
+            return {"success": False, "error": "input_path 不在允許的目錄範圍內"}
+        if not src.is_file():
+            return {"success": False, "error": f"檔案不存在：{src}"}
+
+        ext = src.suffix.lower()
+        if ext not in _PPT_SUPPORTED_EXTENSIONS:
+            return {"success": False, "error": f"不支援的檔案格式：{ext}。支援的格式：{', '.join(_PPT_SUPPORTED_EXTENSIONS)}"}
+
+        if output_dir:
+            out_dir = Path(output_dir).resolve()
+            if not readonly_mode and not _is_path_allowed(out_dir, allowed_paths):
+                return {"success": False, "error": "output_dir 不在允許的目錄範圍內"}
+        elif readonly_mode:
+            out_dir = get_temp_dir_for_ppt(endpoint_id) / f"{src.stem}_{uuid.uuid4().hex[:8]}"
+        else:
+            out_dir = src.parent / f"{src.stem}_slides"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        pdf_work_dir = Path(tempfile.mkdtemp(prefix="mcp-ppt-pdf-"))
+        try:
+            try:
+                pdf_path = _ppt_convert_to_pdf(soffice_path, src, pdf_work_dir)
+            except Exception as exc:
+                return {"success": False, "error": f"轉換失敗：{exc}"}
+
+            try:
+                images = _ppt_render_pdf_pages(pdf_path)
+            except Exception as exc:
+                return {"success": False, "error": f"PDF 渲染失敗：{exc}"}
+
+            if not images:
+                return {"success": False, "error": "轉換失敗，投影片頁數為 0"}
+
+            use_grid = mode == "grid" or (mode == "auto" and len(images) > _PPT_INDIVIDUAL_THRESHOLD)
+            output_files: list[str] = []
+
+            if use_grid:
+                cols = grid_cols if grid_cols > 0 else _PPT_GRID_COLS
+                grids = _ppt_build_grid_images(images, cols)
+                for i, grid in enumerate(grids):
+                    name = f"{src.stem}_grid_{i + 1}.jpg" if len(grids) > 1 else f"{src.stem}_grid.jpg"
+                    dst = out_dir / name
+                    grid.save(str(dst), "JPEG", quality=95)
+                    output_files.append(str(dst))
+            else:
+                for i, img in enumerate(images):
+                    name = f"{src.stem}_slide_{i + 1:03d}.png"
+                    dst = out_dir / name
+                    img.save(str(dst), "PNG")
+                    output_files.append(str(dst))
+
+            return {
+                "success": True,
+                "slide_count": len(images),
+                "mode": "grid" if use_grid else "individual",
+                "output_dir": str(out_dir),
+                "output_files": output_files,
+                "readonly_mode": readonly_mode,
+            }
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(pdf_work_dir, ignore_errors=True)
+
+    return ppt_mcp

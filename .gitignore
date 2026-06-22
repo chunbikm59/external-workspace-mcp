@@ -219,3 +219,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node.js / Electron (electron-gui)
+node_modules/
+dist/
+out/
+*.tsbuildinfo
+
+# LibreOffice Portable (downloaded by electron-gui/scripts/fetch-libreoffice.mjs)
+electron-gui/resources/libreoffice-portable/
+
+# electron-gui runtime data
+electron-gui/Data/
+
+# Local MCP server config
+.mcp.json
+
+# Local test data
+測試用資料夾/
+

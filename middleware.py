@@ -12,6 +12,15 @@ logger = logging.getLogger(__name__)
 _TOOLS_WITH_EXCLUDE = {"fs_directory_tree"}
 _FS_TOOLS_EXCLUDED = {"fs_read_file", "fs_read_text_file", "fs_search_files"}
 
+# 唯讀模式下停用的寫入類工具（對齊 GUI 版 toolFilter.ts 的 WRITE_TOOLS）
+_WRITE_TOOLS = {
+    "fs_write_file",
+    "fs_edit_file",
+    "fs_move_file",
+    "cmd_run_command",
+    "cmd_reload_whitelist",
+}
+
 
 def _gitignore_to_minimatch(pattern: str) -> list[str]:
     p = pattern.strip()
@@ -81,25 +90,43 @@ class GitignoreExcludeMiddleware(Middleware):
 
 
 class ToolFilterMiddleware(Middleware):
-    """隱藏被自訂工具取代的 fs_* 工具。"""
+    """隱藏被自訂工具取代的 fs_* 工具；唯讀模式下另隱藏寫入工具，並可停用指定工具。"""
+
+    def __init__(
+        self,
+        readonly_mode: bool = False,
+        disabled_tools: list[str] | None = None,
+    ) -> None:
+        self._readonly_mode = readonly_mode
+        self._disabled_tools = set(disabled_tools or [])
+
+    def _hidden_tools(self) -> set[str]:
+        hidden = set(_FS_TOOLS_EXCLUDED) | self._disabled_tools
+        if self._readonly_mode:
+            hidden |= _WRITE_TOOLS
+        return hidden
 
     async def on_list_tools(self, context, call_next):
         tools = await call_next(context)
-        return [t for t in tools if t.name not in _FS_TOOLS_EXCLUDED]
+        hidden = self._hidden_tools()
+        return [t for t in tools if t.name not in hidden]
 
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
-        if context.message.name in _FS_TOOLS_EXCLUDED:
+        name = context.message.name
+        if name in _FS_TOOLS_EXCLUDED:
             alternatives = {
                 "fs_read_file": "read_file",
                 "fs_read_text_file": "read_file",
                 "fs_search_files": "glob_files",
             }
-            alt = alternatives.get(context.message.name, "read_file")
-            raise ValueError(
-                f"工具 '{context.message.name}' 已停用。請改用：{alt}。"
-            )
+            alt = alternatives.get(name, "read_file")
+            raise ValueError(f"工具 '{name}' 已停用。請改用：{alt}。")
+        if self._readonly_mode and name in _WRITE_TOOLS:
+            raise ValueError(f"工具 '{name}' 在唯讀模式下已停用。")
+        if name in self._disabled_tools:
+            raise ValueError(f"工具 '{name}' 已被停用。")
         return await call_next(context)

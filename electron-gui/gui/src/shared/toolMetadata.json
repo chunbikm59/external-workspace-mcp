@@ -1,0 +1,387 @@
+[
+  {
+    "name": "cmd_list_allowed_commands",
+    "description": "列出所有白名單命令及說明。",
+    "params": []
+  },
+  {
+    "name": "cmd_reload_whitelist",
+    "description": "重新從磁碟載入白名單命令（需要在 GUI 介面中由使用者確認）。",
+    "params": []
+  },
+  {
+    "name": "cmd_run_command",
+    "description": "執行白名單中的命令。支援以 \";\" 串接多個命令。僅允許完全符合白名單的命令。",
+    "params": [
+      {
+        "name": "command",
+        "type": "string",
+        "required": true,
+        "description": "要執行的命令（可用 \";\" 串接多個）"
+      },
+      {
+        "name": "fail_fast",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "遇到失敗時是否停止後續命令"
+      }
+    ]
+  },
+  {
+    "name": "cmd_workspace_context",
+    "description": "一次取得工作區概覽：allowed_paths、白名單命令、各目錄的頂層結構。",
+    "params": []
+  },
+  {
+    "name": "file_get_download_uri",
+    "description": "為指定檔案產生 10 分鐘有效的臨時 HTTP 下載連結。檔案位於遠端工作站，本工具集其他工具回傳的檔案路徑無法用內建檔案讀取工具直接開啟，需先用此工具取得下載連結並下載到本機後才能讀取內容。",
+    "params": [
+      {
+        "name": "file_path",
+        "type": "string",
+        "required": true,
+        "description": "檔案絕對路徑，必須在 allowed_paths 範圍內"
+      },
+      {
+        "name": "session_id",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "description": "MCP session ID（用於組裝正確的下載 URL）"
+      }
+    ]
+  },
+  {
+    "name": "fs_directory_tree",
+    "description": "遞迴展開目錄結構，自動套用 .gitignore 排除規則。",
+    "params": [
+      {
+        "name": "path",
+        "type": "string",
+        "required": true,
+        "description": "目錄路徑，必須在 allowed_paths 範圍內"
+      },
+      {
+        "name": "max_depth",
+        "type": "integer",
+        "required": false,
+        "default": 4,
+        "description": "最大展開深度"
+      },
+      {
+        "name": "exclude_patterns",
+        "type": "array",
+        "required": false,
+        "default": [],
+        "description": "額外排除的 glob pattern"
+      }
+    ]
+  },
+  {
+    "name": "fs_edit_file",
+    "description": "對檔案進行精確字串替換。",
+    "params": [
+      {
+        "name": "path",
+        "type": "string",
+        "required": true,
+        "description": "目標檔案路徑"
+      },
+      {
+        "name": "old_text",
+        "type": "string",
+        "required": true,
+        "description": "要被替換的精確文字"
+      },
+      {
+        "name": "new_text",
+        "type": "string",
+        "required": true,
+        "description": "替換後的文字"
+      }
+    ]
+  },
+  {
+    "name": "fs_get_file_info",
+    "description": "取得檔案或目錄的元資訊（大小、修改時間、類型）。",
+    "params": [
+      {
+        "name": "path",
+        "type": "string",
+        "required": true,
+        "description": "檔案或目錄路徑"
+      }
+    ]
+  },
+  {
+    "name": "fs_list_directory",
+    "description": "列出目錄內容（檔案與子目錄）。",
+    "params": [
+      {
+        "name": "path",
+        "type": "string",
+        "required": true,
+        "description": "目錄路徑"
+      }
+    ]
+  },
+  {
+    "name": "fs_move_file",
+    "description": "移動或重新命名檔案/目錄。",
+    "params": [
+      {
+        "name": "source",
+        "type": "string",
+        "required": true,
+        "description": "來源路徑"
+      },
+      {
+        "name": "destination",
+        "type": "string",
+        "required": true,
+        "description": "目標路徑"
+      }
+    ]
+  },
+  {
+    "name": "fs_read_media_file",
+    "description": "讀取圖片或其他媒體檔案，回傳 base64 編碼內容。",
+    "params": [
+      {
+        "name": "path",
+        "type": "string",
+        "required": true,
+        "description": "媒體檔案路徑"
+      }
+    ]
+  },
+  {
+    "name": "fs_write_file",
+    "description": "將內容寫入檔案（完整覆蓋）。",
+    "params": [
+      {
+        "name": "path",
+        "type": "string",
+        "required": true,
+        "description": "目標檔案路徑"
+      },
+      {
+        "name": "content",
+        "type": "string",
+        "required": true,
+        "description": "要寫入的內容"
+      }
+    ]
+  },
+  {
+    "name": "glob_files",
+    "description": "以 glob pattern 搜尋符合的檔名，結果依修改時間排序（最新在前）。自動尊重 .gitignore。",
+    "params": [
+      {
+        "name": "pattern",
+        "type": "string",
+        "required": true,
+        "description": "glob pattern，例如 \"**/*.ts\""
+      },
+      {
+        "name": "path",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "description": "搜尋根目錄，留空使用第一個 allowed_path"
+      },
+      {
+        "name": "limit",
+        "type": "integer",
+        "required": false,
+        "default": 100,
+        "description": "最大結果數"
+      }
+    ]
+  },
+  {
+    "name": "grep_files",
+    "description": "以 ripgrep 搜尋檔案內容。output_mode: \"content\"（預設）回傳匹配行，\"files_with_matches\" 只回傳檔案路徑，\"count\" 回傳各檔案匹配數。",
+    "params": [
+      {
+        "name": "pattern",
+        "type": "string",
+        "required": true,
+        "description": "搜尋 pattern（正規表達式）"
+      },
+      {
+        "name": "path",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "description": "搜尋根目錄，留空使用第一個 allowed_path"
+      },
+      {
+        "name": "output_mode",
+        "type": "string",
+        "required": false,
+        "default": "content",
+        "description": "輸出模式",
+        "enumValues": [
+          "content",
+          "files_with_matches",
+          "count"
+        ]
+      },
+      {
+        "name": "glob",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "description": "檔案 glob 過濾（例 \"*.py\"）"
+      },
+      {
+        "name": "file_type",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "description": "ripgrep 內建類型（例 \"py\"）"
+      },
+      {
+        "name": "context_lines",
+        "type": "integer",
+        "required": false,
+        "default": 0,
+        "description": "前後文行數 (-C)"
+      },
+      {
+        "name": "before_context",
+        "type": "integer",
+        "required": false,
+        "default": 0,
+        "description": "前文行數 (-B)"
+      },
+      {
+        "name": "after_context",
+        "type": "integer",
+        "required": false,
+        "default": 0,
+        "description": "後文行數 (-A)"
+      },
+      {
+        "name": "ignore_case",
+        "type": "boolean",
+        "required": false,
+        "default": false,
+        "description": "不分大小寫"
+      },
+      {
+        "name": "head_limit",
+        "type": "integer",
+        "required": false,
+        "default": 250,
+        "description": "最大結果行數，0 不限制"
+      },
+      {
+        "name": "offset",
+        "type": "integer",
+        "required": false,
+        "default": 0,
+        "description": "跳過前 N 筆（分頁）"
+      },
+      {
+        "name": "fixed_strings",
+        "type": "boolean",
+        "required": false,
+        "default": false,
+        "description": "純字串比對（不使用 regex）"
+      },
+      {
+        "name": "multiline",
+        "type": "boolean",
+        "required": false,
+        "default": false,
+        "description": "多行模式（. 匹配 \\n）"
+      }
+    ]
+  },
+  {
+    "name": "md_capture_ppt_slides",
+    "description": "將 PPT/PPTX/ODP 投影片轉換為 PNG/JPEG 圖片並寫入磁碟（需系統安裝 LibreOffice）。 頁數較多時自動將多張投影片合併為格狀縮圖（grid）以減少檔案數量；可用 mode 強制指定。 回傳的圖片路徑可搭配 file_get_download_uri 工具產生下載連結後讀取。 輸出路徑預設為來源檔案同目錄下的 <檔名>_slides/ 子目錄。",
+    "params": [
+      {
+        "name": "input_path",
+        "type": "string",
+        "required": true,
+        "description": "來源 PPT/PPTX/ODP 檔案絕對路徑，必須在 allowed_paths 範圍內"
+      },
+      {
+        "name": "output_dir",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "description": "輸出目錄；留空則自動決定（唯讀模式下強制寫入暫存目錄）"
+      },
+      {
+        "name": "mode",
+        "type": "string",
+        "required": false,
+        "default": "auto",
+        "description": "輸出模式：auto（依頁數自動決定，頁數 <= 8 時逐頁輸出，否則合併為 grid）、individual（強制逐頁輸出單張圖片）、grid（強制合併為格狀縮圖）",
+        "enumValues": [
+          "auto",
+          "individual",
+          "grid"
+        ]
+      },
+      {
+        "name": "grid_cols",
+        "type": "integer",
+        "required": false,
+        "default": 0,
+        "description": "grid 模式每列欄數，0 表示使用預設值（2 欄，即 2x2/2x3 排版）"
+      }
+    ]
+  },
+  {
+    "name": "md_convert_to_markdown",
+    "description": "將檔案（PDF、DOCX、HTML、XLSX）轉換為 Markdown 並寫入磁碟。 輸出路徑預設為同目錄同檔名加 .md 副檔名。",
+    "params": [
+      {
+        "name": "input_path",
+        "type": "string",
+        "required": true,
+        "description": "來源檔案絕對路徑，必須在 allowed_paths 範圍內"
+      },
+      {
+        "name": "output_path",
+        "type": "string",
+        "required": false,
+        "default": "",
+        "description": "輸出 .md 檔案路徑；留空則自動決定（唯讀模式下強制寫入暫存目錄）"
+      }
+    ]
+  },
+  {
+    "name": "read_file",
+    "description": "讀取文字檔案內容，回傳帶行號格式（\"{行號}\\t{內容}\"）。支援 offset/limit 分段讀取大型檔案。",
+    "params": [
+      {
+        "name": "path",
+        "type": "string",
+        "required": true,
+        "description": "檔案絕對路徑，必須在 allowed_paths 範圍內"
+      },
+      {
+        "name": "offset",
+        "type": "integer",
+        "required": false,
+        "default": 0,
+        "description": "起始行（0-indexed）"
+      },
+      {
+        "name": "limit",
+        "type": "integer",
+        "required": false,
+        "default": 0,
+        "description": "讀取行數，0 表示讀到底"
+      }
+    ]
+  }
+]

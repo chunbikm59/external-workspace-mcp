@@ -1,0 +1,14 @@
+{
+  "name": "mcp-workspace-gui",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:server": "npm run build:watch --prefix server",
+    "dev:gui": "npm run dev --prefix gui",
+    "build:server": "npm run build --prefix server",
+    "build:tool-metadata": "npm run extract:tool-metadata --prefix server",
+    "build:gui": "npm run build --prefix gui",
+    "build": "npm run build:server && npm run build:tool-metadata && npm run build:gui",
+    "install:all": "npm install --prefix server && npm install --prefix gui"
+  }
+}

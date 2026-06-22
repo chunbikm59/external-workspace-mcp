@@ -1,0 +1,6 @@
+node_modules/
+resources/
+build-tmp/
+gui/out/
+server/dist/
+*.tsbuildinfo
